@@ -44,57 +44,57 @@ static int null_uu_inited = 0;
 static uuid_t null_uu;
 
 void
-pcap_clear_if_infos(pcap_t * pcap)
+pcap_if_info_set_clear(struct pcap_if_info_set *if_info_set)
 {
 	int i;
 	
-	if (pcap->if_infos != NULL) {
-		for (i = 0; i < pcap->if_info_count; i++)
-			pcap_free_if_info(pcap, pcap->if_infos[i]);
+	if (if_info_set->if_infos != NULL) {
+		for (i = 0; i < if_info_set->if_info_count; i++)
+			pcap_if_info_set_free(if_info_set, if_info_set->if_infos[i]);
 		
-		free(pcap->if_infos);
-		pcap->if_infos = NULL;
+		free(if_info_set->if_infos);
+		if_info_set->if_infos = NULL;
 	}
-	pcap->if_info_count = 0;
-	pcap->if_dump_id = 0;
+	if_info_set->if_info_count = 0;
+	if_info_set->if_dump_id = 0;
 }
 
 struct pcap_if_info *
-pcap_find_if_info_by_name(pcap_t * pcap, const char *name)
+pcap_if_info_set_find_by_name(struct pcap_if_info_set *if_info_set, const char *name)
 {
 	int i;
 	
-	for (i = 0; i < pcap->if_info_count; i++) {
-		if (strcmp(name, pcap->if_infos[i]->if_name) == 0)
-			return (pcap->if_infos[i]);
+	for (i = 0; i < if_info_set->if_info_count; i++) {
+		if (strcmp(name, if_info_set->if_infos[i]->if_name) == 0)
+			return (if_info_set->if_infos[i]);
 	}
 	return (NULL);
 }
 
 struct pcap_if_info *
-pcap_find_if_info_by_id(pcap_t * pcap, int if_id)
+pcap_if_info_set_find_by_id(struct pcap_if_info_set *if_info_set, int if_id)
 {
 	int i;
 	
 	if (if_id == -1)
 		return (NULL);
 	
-	for (i = 0; i < pcap->if_info_count; i++) {
-		if (if_id == pcap->if_infos[i]->if_id)
-			return (pcap->if_infos[i]);
+	for (i = 0; i < if_info_set->if_info_count; i++) {
+		if (if_id == if_info_set->if_infos[i]->if_id)
+			return (if_info_set->if_infos[i]);
 	}
 	return (NULL);
 }
 
 void
-pcap_free_if_info(pcap_t * pcap, struct pcap_if_info *if_info)
+pcap_if_info_set_free(struct pcap_if_info_set *if_info_set, struct pcap_if_info *if_info)
 {
 	if (if_info != NULL) {
 		int i;
 		
-		for (i = 0; i < pcap->if_info_count; i++) {
-			if (pcap->if_infos[i] == if_info) {
-				pcap->if_infos[i] = NULL;
+		for (i = 0; i < if_info_set->if_info_count; i++) {
+			if (if_info_set->if_infos[i] == if_info) {
+				if_info_set->if_infos[i] = NULL;
 				break;
 			}
 		}
@@ -105,22 +105,23 @@ pcap_free_if_info(pcap_t * pcap, struct pcap_if_info *if_info)
 }
 
 struct pcap_if_info *
-pcap_add_if_info(pcap_t * pcap, const char *name,
-		 int if_id, int linktype, int snaplen)
+pcap_if_info_set_add(struct pcap_if_info_set *if_info_set, const char *name,
+		 int if_id, int linktype, int snaplen,
+		 const char *filter_str, char *errbuf)
 {
 	struct pcap_if_info *if_info = NULL;
 	size_t ifname_len = strlen(name);
 	struct pcap_if_info **newarray;
-
-	pcap->cleanup_extra_op = pcap_ng_init_section_info;
 
 	/*
 	 * Stash the interface name after the structure
 	 */
 	if_info = calloc(1, sizeof(struct pcap_if_info) + ifname_len + 1);
 	if (if_info == NULL) {
-		snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
+		if (errbuf != NULL) {
+			snprintf(errbuf, PCAP_ERRBUF_SIZE,
 				 "%s: calloc() failed", __func__);
+		}
 		return (NULL);
 	}
 	if_info->if_name = (char *)(if_info + 1);
@@ -128,7 +129,7 @@ pcap_add_if_info(pcap_t * pcap, const char *name,
 		bcopy(name, if_info->if_name, ifname_len);
 	if_info->if_name[ifname_len] = 0;
 	if (if_id == -1)
-		if_info->if_id = pcap->if_info_count;
+		if_info->if_id = if_info_set->if_info_count;
 	else
 		if_info->if_id = if_id;
 	if_info->if_linktype = linktype;
@@ -138,13 +139,15 @@ pcap_add_if_info(pcap_t * pcap, const char *name,
 	 * The compilation of a BPF filter expression depends on
 	 * the DLT so we store the program in the if_info
 	 */
-	if (pcap->filter_str != NULL && *pcap->filter_str != 0) {
+	if (filter_str != NULL && *filter_str != 0) {
 		if (pcap_compile_nopcap(if_info->if_snaplen,
 					if_info->if_linktype,
 					&if_info->if_filter_program,
-					pcap->filter_str, 0, PCAP_NETMASK_UNKNOWN) == -1) {
-			snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
+					filter_str, 0, PCAP_NETMASK_UNKNOWN) == -1) {
+			if (errbuf != NULL) {
+				snprintf(errbuf, PCAP_ERRBUF_SIZE,
 					 "%s: pcap_compile_nopcap() failed", __func__);
+			 }
 			free(if_info);
 			return (NULL);
 		}
@@ -153,75 +156,128 @@ pcap_add_if_info(pcap_t * pcap, const char *name,
 	/*
 	 * Resize pointer array
 	 */
-	newarray = realloc(pcap->if_infos,
-			   (pcap->if_info_count + 1) * sizeof(struct pcap_if_info *));
+	newarray = realloc(if_info_set->if_infos,
+			   (if_info_set->if_info_count + 1) * sizeof(struct pcap_if_info *));
 	if (newarray == NULL) {
-		snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
+		if (errbuf != NULL) {
+			snprintf(errbuf, PCAP_ERRBUF_SIZE,
 				 "%s: realloc() failed", __func__);
-		pcap_free_if_info(pcap, if_info);
+				 }
+		pcap_if_info_set_free(if_info_set, if_info);
 		return (NULL);
 	}
-	pcap->if_infos = newarray;
-	pcap->if_infos[pcap->if_info_count] = if_info;
-	pcap->if_info_count += 1;
+	if_info_set->if_infos = newarray;
+	if_info_set->if_infos[if_info_set->if_info_count] = if_info;
+	if_info_set->if_info_count += 1;
 	
 	return (if_info);
 }
 
 void
-pcap_clear_proc_infos(pcap_t * pcap)
+pcap_clear_if_infos(pcap_t * pcap)
+{
+	pcap_if_info_set_clear(&pcap->if_info_set);
+}
+
+struct pcap_if_info *
+pcap_find_if_info_by_name(pcap_t * pcap, const char *name)
+{
+	return (pcap_if_info_set_find_by_name(&pcap->if_info_set, name));
+}
+
+struct pcap_if_info *
+pcap_find_if_info_by_id(pcap_t * pcap, int if_id)
+{
+	return (pcap_if_info_set_find_by_id(&pcap->if_info_set, if_id));
+}
+
+void
+pcap_free_if_info(pcap_t * pcap, struct pcap_if_info *if_info)
+{
+	pcap_if_info_set_free(&pcap->if_info_set, if_info);
+}
+
+struct pcap_if_info *
+pcap_add_if_info(pcap_t * pcap, const char *name,
+		 int if_id, int linktype, int snaplen)
+{
+	struct pcap_if_info *if_info = NULL;
+
+	pcap->cleanup_extra_op = pcap_ng_init_section_info;
+
+	if_info = pcap_if_info_set_add(&pcap->if_info_set,
+		name, if_id, linktype, snaplen,
+		pcap->filter_str, pcap->errbuf);
+	
+	return (if_info);
+}
+
+void
+pcap_proc_info_set_clear(struct pcap_proc_info_set *proc_info_set)
 {
 	int i;
 	
-	if (pcap->proc_infos != NULL) {
-		for (i = 0; i < pcap->proc_info_count; i++)
-			pcap_free_proc_info(pcap, pcap->proc_infos[i]);
+	if (proc_info_set->proc_infos != NULL) {
+		for (i = 0; i < proc_info_set->proc_info_count; i++)
+			pcap_proc_info_set_free(proc_info_set, proc_info_set->proc_infos[i]);
 		
-		free(pcap->proc_infos);
-		pcap->proc_infos = NULL;
+		free(proc_info_set->proc_infos);
+		proc_info_set->proc_infos = NULL;
 	}
-	pcap->proc_info_count = 0;
-	pcap->proc_dump_index = 0;
+	proc_info_set->proc_info_count = 0;
+	proc_info_set->proc_dump_index = 0;
 }
 
 struct pcap_proc_info *
-pcap_find_proc_info(pcap_t * pcap, uint32_t pid, const char *name)
+pcap_proc_info_set_find(struct pcap_proc_info_set *proc_info_set,
+	uint32_t pid, const char *name)
 {
-	int i;
-	
-	for (i = 0; i < pcap->proc_info_count; i++) {
-		struct pcap_proc_info *proc_info = pcap->proc_infos[i];
-		
-		if (pid == proc_info->proc_pid &&
-			strcmp(name, proc_info->proc_name) == 0)
-			return (proc_info);
-	}
-	return (NULL);
+	return (pcap_proc_info_set_find_uuid(proc_info_set, pid, name, NULL));
 }
 
 struct pcap_proc_info *
-pcap_find_proc_info_uuid(pcap_t * pcap, uint32_t pid, const char *name, uuid_t uu)
+pcap_proc_info_set_find_uuid(struct pcap_proc_info_set *proc_info_set,
+	uint32_t pid, const char *name, const uuid_t uu)
 {
 	int i;
-	
-	for (i = 0; i < pcap->proc_info_count; i++) {
-		struct pcap_proc_info *proc_info = pcap->proc_infos[i];
+
+	if (name != NULL && uu != NULL) {
+		for (i = 0; i < proc_info_set->proc_info_count; i++) {
+			struct pcap_proc_info *proc_info = proc_info_set->proc_infos[i];
 		
 		if (pid == proc_info->proc_pid &&
 		    strcmp(name, proc_info->proc_name) == 0 &&
 		    uuid_compare(uu, proc_info->proc_uuid) == 0)
+				return (proc_info);
+		}
+	} else if (name != NULL) {
+		for (i = 0; i < proc_info_set->proc_info_count; i++) {
+			struct pcap_proc_info *proc_info = proc_info_set->proc_infos[i];
+			
+			if (pid == proc_info->proc_pid &&
+			    strcmp(name, proc_info->proc_name) == 0)
+				return (proc_info);
+		}
+	} else if (uu != NULL) {
+		for (i = 0; i < proc_info_set->proc_info_count; i++) {
+			struct pcap_proc_info *proc_info = proc_info_set->proc_infos[i];
+			
+			if (pid == proc_info->proc_pid &&
+			    uuid_compare(uu, proc_info->proc_uuid) == 0)
 			return (proc_info);
+	}
 	}
 	return (NULL);
 }
 
 struct pcap_proc_info *
-pcap_find_proc_info_by_index(pcap_t * pcap, uint32_t index)
+pcap_proc_info_set_find_by_index(struct pcap_proc_info_set *proc_info_set,
+	uint32_t index)
 {
 	int i;
 	
-	for (i = 0; i < pcap->proc_info_count; i++) {
-		struct pcap_proc_info *proc_info = pcap->proc_infos[i];
+	for (i = 0; i < proc_info_set->proc_info_count; i++) {
+		struct pcap_proc_info *proc_info = proc_info_set->proc_infos[i];
 		
 		if (index == proc_info->proc_index)
 			return (proc_info);
@@ -230,15 +286,16 @@ pcap_find_proc_info_by_index(pcap_t * pcap, uint32_t index)
 }
 
 void
-pcap_free_proc_info(pcap_t * pcap, struct pcap_proc_info *proc_info)
+pcap_proc_info_set_free(struct pcap_proc_info_set *proc_info_set,
+	struct pcap_proc_info *proc_info)
 {
 	
 	if (proc_info != NULL) {
 		int i;
 		
-		for (i = 0; i < pcap->proc_info_count; i++) {
-			if (pcap->proc_infos[i] == proc_info) {
-				pcap->proc_infos[i] = NULL;
+		for (i = 0; i < proc_info_set->proc_info_count; i++) {
+			if (proc_info_set->proc_infos[i] == proc_info) {
+				proc_info_set->proc_infos[i] = NULL;
 				break;
 			}
 		}
@@ -247,21 +304,28 @@ pcap_free_proc_info(pcap_t * pcap, struct pcap_proc_info *proc_info)
 }
 
 struct pcap_proc_info *
-pcap_add_proc_info_uuid(pcap_t * pcap, uint32_t pid, const char *name, uuid_t uu)
+pcap_proc_info_set_add_uuid(struct pcap_proc_info_set *proc_info_set,
+	uint32_t pid, const char *name, const uuid_t uu, char *errbuf)
 {
 	struct pcap_proc_info *proc_info = NULL;
-	size_t name_len = strlen(name);
+	size_t name_len = name != NULL ? strlen(name) : 0;
 	struct pcap_proc_info **newarray;
+	uuid_string_t uu_str;
 	
-	pcap->cleanup_extra_op = pcap_ng_init_section_info;
+	if (uu == NULL && null_uu_inited == 0) {
+		uuid_clear(null_uu);
+		null_uu_inited = 1;
+	}
 	
 	/*
 	 * Stash the process name after the structure
 	 */
 	proc_info = calloc(1, sizeof(struct pcap_proc_info) + name_len + 1);
 	if (proc_info == NULL) {
-		snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
+		if (errbuf != NULL) {
+			snprintf(errbuf, PCAP_ERRBUF_SIZE,
 			 "%s: calloc() failed", __func__);
+		}
 		return (NULL);
 	}
 	proc_info->proc_name = (char *)(proc_info + 1);
@@ -269,23 +333,72 @@ pcap_add_proc_info_uuid(pcap_t * pcap, uint32_t pid, const char *name, uuid_t uu
 		bcopy(name, proc_info->proc_name, name_len);
 	proc_info->proc_name[name_len] = 0;
 	proc_info->proc_pid = pid;
-	proc_info->proc_index = pcap->proc_info_count;
-	uuid_copy(proc_info->proc_uuid, uu);
+	proc_info->proc_index = proc_info_set->proc_info_count;
+	uuid_copy(proc_info->proc_uuid, uu != NULL ? uu : null_uu);
+
+	uuid_unparse_lower(proc_info->proc_uuid, uu_str);
 	
 	/*
 	 * Resize pointer array
 	 */
-	newarray = realloc(pcap->proc_infos,
-			   (pcap->proc_info_count + 1) * sizeof(struct pcap_proc_info *));
+	newarray = realloc(proc_info_set->proc_infos,
+			   (proc_info_set->proc_info_count + 1) * sizeof(struct pcap_proc_info *));
 	if (newarray == NULL) {
-		snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
+		if (errbuf != NULL) {
+			snprintf(errbuf, PCAP_ERRBUF_SIZE,
 			 "%s: malloc() failed", __func__);
-		pcap_free_proc_info(pcap, proc_info);
+		}
+		free(proc_info);
 		return (NULL);
 	}
-	pcap->proc_infos = newarray;
-	pcap->proc_infos[pcap->proc_info_count] = proc_info;
-	pcap->proc_info_count += 1;
+	proc_info_set->proc_infos = newarray;
+	proc_info_set->proc_infos[proc_info_set->proc_info_count] = proc_info;
+	proc_info_set->proc_info_count += 1;
+
+	return (proc_info);
+}
+
+void
+pcap_clear_proc_infos(pcap_t * pcap)
+{
+	pcap_proc_info_set_clear(&pcap->proc_info_set);
+}
+
+struct pcap_proc_info *
+pcap_find_proc_info(pcap_t * pcap, uint32_t pid, const char *name)
+{
+	return (pcap_proc_info_set_find(&pcap->proc_info_set, pid, name));
+}
+
+struct pcap_proc_info *
+pcap_find_proc_info_uuid(pcap_t * pcap, uint32_t pid, const char *name, const uuid_t uu)
+{
+	return (pcap_proc_info_set_find_uuid(&pcap->proc_info_set, pid, name, uu));
+}
+
+struct pcap_proc_info *
+pcap_find_proc_info_by_index(pcap_t * pcap, uint32_t index)
+{
+	return (pcap_proc_info_set_find_by_index(&pcap->proc_info_set, index));
+}
+
+void
+pcap_free_proc_info(pcap_t * pcap, struct pcap_proc_info *proc_info)
+{
+	pcap_proc_info_set_free(&pcap->proc_info_set, proc_info);
+}
+
+struct pcap_proc_info *
+pcap_add_proc_info_uuid(pcap_t * pcap, uint32_t pid, const char *name, const uuid_t uu)
+{
+	struct pcap_proc_info *proc_info = NULL;
+
+	pcap->cleanup_extra_op = pcap_ng_init_section_info;
+
+	proc_info = pcap_proc_info_set_add_uuid(&pcap->proc_info_set,
+						pid, name,
+						uu,
+						pcap->errbuf);
 	
 	return (proc_info);
 }
@@ -294,16 +407,7 @@ pcap_add_proc_info_uuid(pcap_t * pcap, uint32_t pid, const char *name, uuid_t uu
 struct pcap_proc_info *
 pcap_add_proc_info(pcap_t * pcap, uint32_t pid, const char *name)
 {
-	struct pcap_proc_info *proc_info = NULL;
-	
-	if (null_uu_inited == 0) {
-		uuid_clear(null_uu);
-		null_uu_inited = 1;
-	}
-	
-	proc_info = pcap_add_proc_info_uuid(pcap, pid, name, null_uu);
-	
-	return (proc_info);
+	return (pcap_add_proc_info_uuid(pcap, pid, name, NULL));
 }
 
 int
@@ -311,9 +415,10 @@ pcap_set_filter_info(pcap_t *pcap, const char *str, int optimize, bpf_u_int32 ne
 {
 	if (pcap->filter_str != NULL)
 		free(pcap->filter_str);
-	if (str == NULL)
+
+	if (str == NULL) {
 		pcap->filter_str = NULL;
-	else {
+	} else {
 		pcap->filter_str = strdup(str);
 		if (pcap->filter_str == NULL)
 			return (PCAP_ERROR);

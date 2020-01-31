@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2018 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -25,7 +25,6 @@
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-
 
 #include "pcap-ng.h"
 #include <stdio.h>
@@ -84,7 +83,6 @@ new_section_info(pcap_t *pcap, struct pcapng_section_header_fields *shb)
 	return section_info;
 }
 
-
 void
 interface_option_iterator(pcapng_block_t block, struct pcapng_option_info *option_info, void *context)
 {
@@ -139,6 +137,9 @@ interface_option_iterator(pcapng_block_t block, struct pcapng_option_info *optio
 struct interface_info *
 new_interface_info(struct section_info *section_info, pcapng_block_t block)
 {
+	if (section_info == NULL)
+		return NULL;
+
 	struct interface_info *interface_info = calloc(1, sizeof(struct interface_info));
 	
 	if (interface_info == NULL)
@@ -290,6 +291,9 @@ block_option_iterator(pcapng_block_t block, struct pcapng_option_info *option_in
 							break;
 						case PCAPNG_EPB_SVC:
 							printf("      epb_svc\n");
+							break;
+						case PCAPNG_EPB_PMD_FLAGS:
+							printf("      epb_pmd_flags\n");
 							break;
 						default:
 							printf("      <unkown epb option>\n");
@@ -589,7 +593,6 @@ test_pcap_ng_fopen_offline(const char *filename, char *errbuf)
 	
 }
 
-
 int
 main(int argc, const char * argv[])
 {
@@ -621,7 +624,7 @@ main(int argc, const char * argv[])
 		
 		if (strcmp(argv[i], "-h") == 0) {
 			char *path = strdup((argv[0]));
-			printf("# usage: %s [-raw] [-block] file\n", basename(path));
+			printf("# usage: %s [-raw] [-block] file\n", getprogname());
 			if (path != NULL)
 				free(path);
 			exit(0);
@@ -670,4 +673,3 @@ main(int argc, const char * argv[])
 	}
 	return 0;
 }
-

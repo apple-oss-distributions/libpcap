@@ -26,10 +26,13 @@
 #ifndef sf_pcap_ng_h
 #define	sf_pcap_ng_h
 
+#ifndef __APPLE__
 extern pcap_t *pcap_ng_check_header(bpf_u_int32 magic, FILE *fp,
-    u_int precision, char *errbuf, int *err, int isng);
+    u_int precision, char *errbuf, int *err);
 
-#ifdef __APPLE__
+#else
+extern pcap_t *pcap_ng_check_header(bpf_u_int32 magic, FILE *fp,
+									u_int precision, char *errbuf, int *err, int isng);
 struct block_cursor;
 
 void *

@@ -1,5 +1,5 @@
 /* config.h.  Generated from config.h.in by configure.  */
-/* config.h.in.  Generated from configure.in by autoheader.  */
+/* config.h.in.  Generated from configure.ac by autoheader.  */
 
 /* Enable optimizer debugging */
 /* #undef BDEBUG */
@@ -131,10 +131,10 @@
 /* define if net/pfvar.h defines PF_NAT through PF_NORDR */
 #define HAVE_PF_NAT_THROUGH_PF_NORDR 1
 
-/* define if you have a Septel API */
+/* define if you have the Septel API */
 /* #undef HAVE_SEPTEL_API */
 
-/* define if you have Myricom SNF API */
+/* define if you have the Myricom SNF API */
 /* #undef HAVE_SNF_API */
 
 /* Define to 1 if you have the `snprintf' function. */
@@ -170,6 +170,9 @@
 /* Define to 1 if you have the `strlcpy' function. */
 #define HAVE_STRLCPY 1
 
+/* Define to 1 if you have the `strtok_r' function. */
+#define HAVE_STRTOK_R 1
+
 /* Define to 1 if the system has the type `struct BPF_TIMEVAL'. */
 #define HAVE_STRUCT_BPF_TIMEVAL 1
 
@@ -188,6 +191,9 @@
 /* Define to 1 if you have the <sys/ioccom.h> header file. */
 #define HAVE_SYS_IOCCOM_H 1
 
+/* Define to 1 if you have the <sys/select.h> header file. */
+#define HAVE_SYS_SELECT_H 1
+
 /* Define to 1 if you have the <sys/sockio.h> header file. */
 #define HAVE_SYS_SOCKIO_H 1
 
@@ -197,6 +203,9 @@
 /* Define to 1 if you have the <sys/types.h> header file. */
 #define HAVE_SYS_TYPES_H 1
 
+/* define if you have the TurboCap API */
+/* #undef HAVE_TC_API */
+
 /* if if_packet.h has tpacket_stats defined */
 /* #undef HAVE_TPACKET_STATS */
 
@@ -205,9 +214,6 @@
 
 /* if struct usbdevfs_ctrltransfer has bRequestType */
 /* #undef HAVE_USBDEVFS_CTRLTRANSFER_BREQUESTTYPE */
-
-/* define if version.h is generated in the build procedure */
-#define HAVE_VERSION_H 1
 
 /* Define to 1 if you have the `vsnprintf' function. */
 #define HAVE_VSNPRINTF 1
@@ -226,9 +232,6 @@
 
 /* path for device for USB sniffing */
 /* #undef LINUX_USB_MON_DEV */
-
-/* if we need a pcap_parse wrapper around yyparse */
-/* #undef NEED_YYPARSE_WRAPPER */
 
 /* Define to 1 if netinet/ether.h declares `ether_hostton' */
 /* #undef NETINET_ETHER_H_DECLARES_ETHER_HOSTTON */
@@ -266,12 +269,6 @@
 /* target host supports Bluetooth Monitor */
 /* #undef PCAP_SUPPORT_BT_MONITOR */
 
-/* target host supports CAN sniffing */
-/* #undef PCAP_SUPPORT_CAN */
-
-/* target host supports canusb */
-/* #undef PCAP_SUPPORT_CANUSB */
-
 /* support D-Bus sniffing */
 /* #undef PCAP_SUPPORT_DBUS */
 
@@ -295,6 +292,10 @@
 
 /* Enable parser debugging */
 /* #undef YYDEBUG */
+
+/* Define to 1 if `lex' declares `yytext' as a `char *' by default, not a
+   `char[]'. */
+#define YYTEXT_POINTER 1
 
 /* Enable large inode numbers on Mac OS X 10.5.  */
 #ifndef _DARWIN_USE_64_BIT_INODE

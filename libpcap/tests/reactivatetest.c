@@ -20,7 +20,7 @@
  */
 
 #ifndef lint
-static const char copyright[] =
+static const char copyright[] _U_ =
     "@(#) Copyright (c) 1988, 1989, 1990, 1991, 1992, 1993, 1994, 1995, 1996, 1997, 2000\n\
 The Regents of the University of California.  All rights reserved.\n";
 #endif
@@ -61,7 +61,6 @@ main(void)
 			error("pcap_activate() of opened pcap_t failed with %s, not PCAP_ERROR_ACTIVATED",
 			    pcap_statustostr(status));
 	}
-    printf("SUCCESS\n");
 	return 0;
 }
 

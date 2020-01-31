@@ -206,7 +206,6 @@ pcapng_update_block_length(pcapng_block_t block)
 	if (block->pcapng_block_len > block->pcapng_buflen) {
 		errx(EX_SOFTWARE, "%s block len %lu greater than buffer size %lu",
 		     __func__, block->pcapng_block_len, block->pcapng_buflen);
-		
 	}
 	
 	return (0);
@@ -424,7 +423,7 @@ pcap_ng_block_packet_copy_data(pcapng_block_t block, const void *ptr,
 			pcap_ng_block_records_ptr(block) :
 			pcap_ng_block_options_ptr(block);
 		size_t len = block->pcapng_records_len + block->pcapng_options_len;
-		int32_t offset = PAD_32BIT(caplen) - block->pcapng_data_len;
+		int32_t offset = PAD_32BIT(caplen) - (int32_t)block->pcapng_data_len;
 		
 		bcopy(tmp, tmp + offset, len);
 	}
@@ -522,7 +521,7 @@ pcap_ng_block_add_option_with_string(pcapng_block_t block, u_short code, const c
 }
 
 int
-pcap_ng_block_add_option_with_uuid(pcapng_block_t block, u_short code, uuid_t uu)
+pcap_ng_block_add_option_with_uuid(pcapng_block_t block, u_short code, const uuid_t uu)
 {
 	return (pcap_ng_block_add_option_with_value(block, code, uu, sizeof(uuid_t)));
 }
@@ -583,7 +582,8 @@ pcap_ng_block_get_option(pcapng_block_t block, u_short code, struct pcapng_optio
 	int swapped;
 	int num_of_options = 0;
 	struct block_cursor cursor;
-	
+	static char errbuf[PCAP_ERRBUF_SIZE + 1];
+
 	if (option_info == NULL)
 		return (PCAP_ERROR);
 	if (block->pcapng_options_len == 0)
@@ -595,8 +595,8 @@ pcap_ng_block_get_option(pcapng_block_t block, u_short code, struct pcapng_optio
 	cursor.data = pcap_ng_block_options_ptr(block);
 	cursor.data_remaining = block->pcapng_options_len;
 	
-	while (get_opthdr_from_block_data(&opthdr, swapped, &cursor, NULL)) {
-		void *value = get_optvalue_from_block_data(&cursor, &opthdr, NULL);
+	while (get_opthdr_from_block_data(&opthdr, swapped, &cursor, errbuf)) {
+		void *value = get_optvalue_from_block_data(&cursor, &opthdr, errbuf);
 		
 		/*
 		 * If option is cut short we cannot parse it, give up
@@ -632,6 +632,7 @@ pcnapng_block_iterate_options(pcapng_block_t block,
 	int swapped;
 	int num_of_options = 0;
 	struct block_cursor cursor;
+	static char errbuf[PCAP_ERRBUF_SIZE + 1];
 
 	if (block == NULL || opt_iterator_func == NULL)
 		return (PCAP_ERROR);
@@ -641,8 +642,8 @@ pcnapng_block_iterate_options(pcapng_block_t block,
 	cursor.data = pcap_ng_block_options_ptr(block);
 	cursor.data_remaining = block->pcapng_options_len;
 
-	while (get_opthdr_from_block_data(&opthdr, swapped, &cursor, NULL)) {
-		void *value = get_optvalue_from_block_data(&cursor, &opthdr, NULL);
+	while (get_opthdr_from_block_data(&opthdr, swapped, &cursor, errbuf)) {
+		void *value = get_optvalue_from_block_data(&cursor, &opthdr, errbuf);
 		struct pcapng_option_info option_info;
 
 		/*
@@ -679,6 +680,7 @@ pcnapng_block_iterate_name_records(pcapng_block_t block,
 	int swapped;
 	int num_of_records = 0;
 	struct block_cursor cursor;
+	static char errbuf[PCAP_ERRBUF_SIZE + 1];
 
 	if (block == NULL || record_iterator_func == NULL)
 		return (PCAP_ERROR);
@@ -693,12 +695,12 @@ pcnapng_block_iterate_name_records(pcapng_block_t block,
 	 * have the same layout as option headers
 	 */
 	while (get_opthdr_from_block_data((struct pcapng_option_header *)&recordhdr,
-									  swapped, &cursor, NULL)) {
+									  swapped, &cursor, errbuf)) {
 		struct pcapng_name_record_info record_info;
 		void *value =
 			get_optvalue_from_block_data(&cursor,
 			                             (struct pcapng_option_header *)&recordhdr,
-			                             NULL);
+			                             errbuf);
 
 		/*
 		 * If record is cut short we cannot parse it, give up
@@ -835,7 +837,7 @@ pcap_ng_externalize_block(void *buffer, size_t buflen, pcapng_block_t block)
 	
 	ptr = buffer;
 	block_header.block_type = block->pcapng_block_type;
-	block_header.total_length = block->pcapng_block_len;
+	block_header.total_length = (bpf_u_int32)block->pcapng_block_len;
 	bcopy(&block_header, ptr + bytes_written, sizeof(struct pcapng_block_header));
 	bytes_written += sizeof(struct pcapng_block_header);
 	
@@ -903,7 +905,7 @@ pcap_ng_externalize_block(void *buffer, size_t buflen, pcapng_block_t block)
 		bytes_written += block->pcapng_options_len;
 	}
 
-	block_trailer.total_length = block->pcapng_block_len;
+	block_trailer.total_length = (bpf_u_int32)block->pcapng_block_len;
 	bcopy(&block_trailer, ptr + bytes_written, bytes_written);
 	bytes_written += sizeof(struct pcapng_block_trailer);		
 		
@@ -922,7 +924,7 @@ pcap_ng_dump_block(pcap_dumper_t *p, pcapng_block_t block)
 	
 	block_header = (struct pcapng_block_header *)pcap_ng_block_header_ptr(block);
 	block_header->block_type = block->pcapng_block_type;
-	block_header->total_length = block->pcapng_block_len;
+	block_header->total_length = (bpf_u_int32)block->pcapng_block_len;
 	
 	switch (block->pcapng_block_type) {
 		case PCAPNG_BT_SHB:
@@ -996,7 +998,7 @@ pcap_ng_dump_block(pcap_dumper_t *p, pcapng_block_t block)
 		iov[iovcnt].iov_base = block_trailer;
 	iovcnt++;
 
-	bytes_written += writev(((FILE *)p)->_file, iov, iovcnt);
+	bytes_written += writev(p->f->_file, iov, iovcnt);
 	
 	return (bytes_written);
 }

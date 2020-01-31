@@ -1,26 +1,4 @@
 /*
- * Copyright (c) 2012-2015 Apple Inc. All rights reserved.
- *
- * @APPLE_LICENSE_HEADER_START@
- *
- * This file contains Original Code and/or Modifications of Original Code
- * as defined in and that are subject to the Apple Public Source License
- * Version 2.0 (the 'License'). You may not use this file except in
- * compliance with the License. Please obtain a copy of the License at
- * http://www.opensource.apple.com/apsl/ and read it before using this
- * file.
- *
- * The Original Code and all software distributed under the License are
- * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
- * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
- * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
- * Please see the License for the specific language governing rights and
- * limitations under the License.
- *
- * @APPLE_LICENSE_HEADER_END@
- */
-/*
  * Copyright (c) 1993, 1994, 1995, 1996, 1997
  *	The Regents of the University of California.  All rights reserved.
  *
@@ -52,9 +30,9 @@ static const char rcsid[] _U_ =
 #include "config.h"
 #endif
 
-#ifdef WIN32
+#ifdef _WIN32
 #include <pcap-stdinc.h>
-#else /* WIN32 */
+#else /* _WIN32 */
 #if HAVE_INTTYPES_H
 #include <inttypes.h>
 #elif HAVE_STDINT_H
@@ -64,7 +42,7 @@ static const char rcsid[] _U_ =
 #include <sys/bitypes.h>
 #endif
 #include <sys/types.h>
-#endif /* WIN32 */
+#endif /* _WIN32 */
 
 #include <errno.h>
 #include <memory.h>
@@ -78,6 +56,11 @@ static const char rcsid[] _U_ =
 
 #ifdef __APPLE__
 #include "pcap-util.h"
+#include <limits.h>
+
+#ifndef MIN
+#define MIN(a,b) ((a)<(b)?(a):(b))
+#endif
 #endif /* __APPLE__ */
 
 #ifdef HAVE_OS_PROTO_H
@@ -147,6 +130,7 @@ struct section_header_block {
  * that means that this code can't read the file.
  */
 #define PCAP_NG_VERSION_MAJOR	1
+#define PCAP_NG_VERSION_MINOR	0
 
 /*
  * Interface Description Block.
@@ -216,7 +200,6 @@ struct packet_block {
 	/* followed by packet data, options, and trailer */
 };
 
-
 /*
  * Block cursor - used when processing the contents of a block.
  * Contains a pointer into the data being processed and a count
@@ -230,8 +213,10 @@ struct block_cursor {
 
 typedef enum {
 	PASS_THROUGH,
-	SCALE_UP,
-	SCALE_DOWN
+	SCALE_UP_DEC,
+	SCALE_DOWN_DEC,
+	SCALE_UP_BIN,
+	SCALE_DOWN_BIN
 } tstamp_scale_type_t;
 
 /*
@@ -239,23 +224,30 @@ typedef enum {
  */
 struct pcap_ng_if {
 	u_int tsresol;			/* time stamp resolution */
-	u_int64_t tsoffset;		/* time stamp offset */
 	tstamp_scale_type_t scale_type;	/* how to scale */
+	u_int scale_factor;		/* time stamp scale factor for power-of-10 tsresol */
+	u_int64_t tsoffset;		/* time stamp offset */
 };
 
 struct pcap_ng_sf {
 	u_int user_tsresol;		/* time stamp resolution requested by the user */
 	bpf_u_int32 ifcount;		/* number of interfaces seen in this capture */
-	bpf_u_int32 ifaces_size;	/* size of arrary below */
+	bpf_u_int32 ifaces_size;	/* size of array below */
 	struct pcap_ng_if *ifaces;	/* array of interface information */
 };
 
-static int pcap_ng_next_packet(pcap_t *p, struct pcap_pkthdr *hdr,
-			       u_char **data);
+#ifdef __APPLE__
 static int pcap_ng_next_block(pcap_t *p, struct pcap_pkthdr *hdr,
-			      u_char **data);
+                              u_char **data);
 static int pcap_ng_next_internal(pcap_t *p, struct pcap_pkthdr *hdr,
-			      u_char **data, int pktonly);
+                                 u_char **data, int pktonly);
+void pcap_ng_cleanup(pcap_t *p);
+#else
+static void pcap_ng_cleanup(pcap_t *p);
+#endif /* __APPLE__ */
+
+static int pcap_ng_next_packet(pcap_t *p, struct pcap_pkthdr *hdr,
+    u_char **data);
 
 static int
 read_bytes(FILE *fp, void *buf, size_t bytes_to_read, int fail_on_eof,
@@ -266,13 +258,13 @@ read_bytes(FILE *fp, void *buf, size_t bytes_to_read, int fail_on_eof,
 	amt_read = fread(buf, 1, bytes_to_read, fp);
 	if (amt_read != bytes_to_read) {
 		if (ferror(fp)) {
-			snprintf(errbuf, PCAP_ERRBUF_SIZE,
+			pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 			    "error reading dump file: %s",
 			    pcap_strerror(errno));
 		} else {
 			if (amt_read == 0 && !fail_on_eof)
 				return (0);	/* EOF */
-			snprintf(errbuf, PCAP_ERRBUF_SIZE,
+			pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 			    "truncated dump file; tried to read %lu bytes, only got %lu",
 			    (unsigned long)bytes_to_read,
 			    (unsigned long)amt_read);
@@ -287,6 +279,8 @@ read_block(FILE *fp, pcap_t *p, struct block_cursor *cursor, char *errbuf)
 {
 	int status;
 	struct block_header bhdr;
+	u_char *bdata;
+	size_t data_remaining;
 
 	status = read_bytes(fp, &bhdr, sizeof(bhdr), 0, errbuf);
 	if (status <= 0)
@@ -305,7 +299,7 @@ read_block(FILE *fp, pcap_t *p, struct block_cursor *cursor, char *errbuf)
 	 * memory if we read a malformed file.
 	 */
 	if (bhdr.total_length > 16*1024*1024) {
-		snprintf(errbuf, PCAP_ERRBUF_SIZE,
+		pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 		    "pcap-ng block size %u > maximum %u",
 		    bhdr.total_length, 16*1024*1024);
 		    return (-1);
@@ -317,20 +311,22 @@ read_block(FILE *fp, pcap_t *p, struct block_cursor *cursor, char *errbuf)
 	 */
 	if (bhdr.total_length < sizeof(struct block_header) +
 	    sizeof(struct block_trailer)) {
-		snprintf(errbuf, PCAP_ERRBUF_SIZE,
+		pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 		    "block in pcap-ng dump file has a length of %u < %lu",
 		    bhdr.total_length,
 		    (unsigned long)(sizeof(struct block_header) + sizeof(struct block_trailer)));
 		return (-1);
 	}
 
+#ifdef __APPLE__
 	/*
 	 * Some ntar files from wireshark.org do not round up the total block length to
 	 * a multiple of 4 bytes -- they must ignore the 32 bit alignment of the block body!
 	 */
 	if (bhdr.total_length % 4 != 0)
 		bhdr.total_length += 4 - (bhdr.total_length % 4);
-	
+#endif /* __APPLE__ */
+
 	/*
 	 * Is the buffer big enough?
 	 */
@@ -338,11 +334,14 @@ read_block(FILE *fp, pcap_t *p, struct block_cursor *cursor, char *errbuf)
 		/*
 		 * No - make it big enough.
 		 */
-		p->buffer = realloc(p->buffer, bhdr.total_length);
-		if (p->buffer == NULL) {
-			snprintf(errbuf, PCAP_ERRBUF_SIZE, "out of memory");
+		void *bigger_buffer;
+
+		bigger_buffer = realloc(p->buffer, bhdr.total_length);
+		if (bigger_buffer == NULL) {
+			pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, "out of memory");
 			return (-1);
 		}
+		p->buffer = bigger_buffer;
 	}
 
 	/*
@@ -350,21 +349,25 @@ read_block(FILE *fp, pcap_t *p, struct block_cursor *cursor, char *errbuf)
 	 * of the block.
 	 */
 	memcpy(p->buffer, &bhdr, sizeof(bhdr));
-	if (read_bytes(fp, p->buffer + sizeof(bhdr),
-	    bhdr.total_length - sizeof(bhdr), 1, errbuf) == -1)
+	bdata = (u_char *)p->buffer + sizeof(bhdr);
+	data_remaining = bhdr.total_length - sizeof(bhdr);
+	if (read_bytes(fp, bdata, data_remaining, 1, errbuf) == -1)
 		return (-1);
 
 	/*
 	 * Initialize the cursor.
 	 */
-	cursor->data = p->buffer + sizeof(bhdr);
-	cursor->data_remaining = bhdr.total_length - sizeof(bhdr) -
-	    sizeof(struct block_trailer);
+	cursor->data = bdata;
+	cursor->data_remaining = data_remaining - sizeof(struct block_trailer);
 	cursor->block_type = bhdr.block_type;
 	return (1);
 }
 
+#ifdef __APPLE__
 void *
+#else
+static void *
+#endif /* __APPLE__ */
 get_from_block_data(struct block_cursor *cursor, size_t chunk_size,
     char *errbuf)
 {
@@ -375,10 +378,9 @@ get_from_block_data(struct block_cursor *cursor, size_t chunk_size,
 	 * the block data.
 	 */
 	if (cursor->data_remaining < chunk_size) {
-		if (errbuf)
-			snprintf(errbuf, PCAP_ERRBUF_SIZE,
-			    "block of type %u in pcap-ng dump file is too short",
-			    cursor->block_type);
+		pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
+		    "block of type %u in pcap-ng dump file is too short",
+		    cursor->block_type);
 		return (NULL);
 	}
 
@@ -439,7 +441,7 @@ get_optvalue_from_block_data(struct block_cursor *cursor,
 
 static int
 process_idb_options(pcap_t *p, struct block_cursor *cursor, u_int *tsresol,
-    u_int64_t *tsoffset, char *errbuf)
+    u_int64_t *tsoffset, int *is_binary, char *errbuf)
 {
 	struct option_header *opthdr;
 	void *optvalue;
@@ -477,7 +479,7 @@ process_idb_options(pcap_t *p, struct block_cursor *cursor, u_int *tsresol,
 
 		case OPT_ENDOFOPT:
 			if (opthdr->option_length != 0) {
-				snprintf(errbuf, PCAP_ERRBUF_SIZE,
+				pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 				    "Interface Description Block has opt_endofopt option with length %u != 0",
 				    opthdr->option_length);
 				return (-1);
@@ -486,13 +488,13 @@ process_idb_options(pcap_t *p, struct block_cursor *cursor, u_int *tsresol,
 
 		case IF_TSRESOL:
 			if (opthdr->option_length != 1) {
-				snprintf(errbuf, PCAP_ERRBUF_SIZE,
+				pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 				    "Interface Description Block has if_tsresol option with length %u != 1",
 				    opthdr->option_length);
 				return (-1);
 			}
 			if (saw_tsresol) {
-				snprintf(errbuf, PCAP_ERRBUF_SIZE,
+				pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 				    "Interface Description Block has more than one if_tsresol option");
 				return (-1);
 			}
@@ -502,11 +504,13 @@ process_idb_options(pcap_t *p, struct block_cursor *cursor, u_int *tsresol,
 				/*
 				 * Resolution is negative power of 2.
 				 */
+				*is_binary = 1;
 				*tsresol = 1 << (tsresol_opt & 0x7F);
 			} else {
 				/*
 				 * Resolution is negative power of 10.
 				 */
+				*is_binary = 0;
 				*tsresol = 1;
 				for (i = 0; i < tsresol_opt; i++)
 					*tsresol *= 10;
@@ -516,11 +520,11 @@ process_idb_options(pcap_t *p, struct block_cursor *cursor, u_int *tsresol,
 				 * Resolution is too high.
 				 */
 				if (tsresol_opt & 0x80) {
-					snprintf(errbuf, PCAP_ERRBUF_SIZE,
+					pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 					    "Interface Description Block if_tsresol option resolution 2^-%u is too high",
 					    tsresol_opt & 0x7F);
 				} else {
-					snprintf(errbuf, PCAP_ERRBUF_SIZE,
+					pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 					    "Interface Description Block if_tsresol option resolution 10^-%u is too high",
 					    tsresol_opt);
 				}
@@ -530,13 +534,13 @@ process_idb_options(pcap_t *p, struct block_cursor *cursor, u_int *tsresol,
 
 		case IF_TSOFFSET:
 			if (opthdr->option_length != 8) {
-				snprintf(errbuf, PCAP_ERRBUF_SIZE,
+				pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 				    "Interface Description Block has if_tsoffset option with length %u != 8",
 				    opthdr->option_length);
 				return (-1);
 			}
 			if (saw_tsoffset) {
-				snprintf(errbuf, PCAP_ERRBUF_SIZE,
+				pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 				    "Interface Description Block has more than one if_tsoffset option");
 				return (-1);
 			}
@@ -561,6 +565,7 @@ add_interface(pcap_t *p, struct block_cursor *cursor, char *errbuf)
 	struct pcap_ng_sf *ps;
 	u_int tsresol;
 	u_int64_t tsoffset;
+	int is_binary;
 
 	ps = p->priv;
 
@@ -576,43 +581,107 @@ add_interface(pcap_t *p, struct block_cursor *cursor, char *errbuf)
 		/*
 		 * We need to grow the array.
 		 */
-		if (ps->ifaces == NULL || ps->ifaces_size == 0) {
+		bpf_u_int32 new_ifaces_size;
+		struct pcap_ng_if *new_ifaces;
+
+		if (ps->ifaces_size == 0) {
 			/*
 			 * It's currently empty.
+			 *
+			 * (The Clang static analyzer doesn't do enough,
+			 * err, umm, dataflow *analysis* to realize that
+			 * ps->ifaces_size == 0 if ps->ifaces == NULL,
+			 * and so complains about a possible zero argument
+			 * to realloc(), so we check for the former
+			 * condition to shut it up.
+			 *
+			 * However, it doesn't complain that one of the
+			 * multiplications below could overflow, which is
+			 * a real, albeit extremely unlikely, problem (you'd
+			 * need a pcap-ng file with tens of millions of
+			 * interfaces).)
 			 */
-			ps->ifaces_size = 1;
-			ps->ifaces = malloc(sizeof (struct pcap_ng_if));
+			new_ifaces_size = 1;
+			new_ifaces = malloc(sizeof (struct pcap_ng_if));
 		} else {
 			/*
 			 * It's not currently empty; double its size.
 			 * (Perhaps overkill once we have a lot of interfaces.)
+			 *
+			 * Check for overflow if we double it.
 			 */
-			ps->ifaces_size *= 2;
-			ps->ifaces = realloc(ps->ifaces, ps->ifaces_size * sizeof (struct pcap_ng_if));
+			if (ps->ifaces_size * 2 < ps->ifaces_size) {
+				/*
+				 * The maximum number of interfaces before
+				 * ps->ifaces_size overflows is the largest
+				 * possible 32-bit power of 2, as we do
+				 * size doubling.
+				 */
+				pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
+				    "more than %u interfaces in the file",
+				    0x80000000U);
+				return (0);
+			}
+
+			/*
+			 * ps->ifaces_size * 2 doesn't overflow, so it's
+			 * safe to multiply.
+			 */
+			new_ifaces_size = ps->ifaces_size * 2;
+
+			/*
+			 * Now make sure that's not so big that it overflows
+			 * if we multiply by sizeof (struct pcap_ng_if).
+			 *
+			 * That can happen on 32-bit platforms, with a 32-bit
+			 * size_t; it shouldn't happen on 64-bit platforms,
+			 * with a 64-bit size_t, as new_ifaces_size is
+			 * 32 bits.
+			 */
+			if (new_ifaces_size * sizeof (struct pcap_ng_if) < new_ifaces_size) {
+				/*
+				 * As this fails only with 32-bit size_t,
+				 * the multiplication was 32x32->32, and
+				 * the largest 32-bit value that can safely
+				 * be multiplied by sizeof (struct pcap_ng_if)
+				 * without overflow is the largest 32-bit
+				 * (unsigned) value divided by
+				 * sizeof (struct pcap_ng_if).
+				 */
+				pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
+				    "more than %u interfaces in the file",
+				    0xFFFFFFFFU / ((u_int)sizeof (struct pcap_ng_if)));
+				return (0);
+			}
+			new_ifaces = realloc(ps->ifaces, new_ifaces_size * sizeof (struct pcap_ng_if));
 		}
-		if (ps->ifaces == NULL) {
+		if (new_ifaces == NULL) {
 			/*
 			 * We ran out of memory.
 			 * Give up.
 			 */
-			snprintf(errbuf, PCAP_ERRBUF_SIZE,
+			pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 			    "out of memory for per-interface information (%u interfaces)",
 			    ps->ifcount);
 			return (0);
 		}
+		ps->ifaces_size = new_ifaces_size;
+		ps->ifaces = new_ifaces;
 	}
 
 	/*
 	 * Set the default time stamp resolution and offset.
 	 */
 	tsresol = 1000000;	/* microsecond resolution */
+	is_binary = 0;		/* which is a power of 10 */
 	tsoffset = 0;		/* absolute timestamps */
 
 	/*
 	 * Now look for various time stamp options, so we know
 	 * how to interpret the time stamps for this interface.
 	 */
-	if (process_idb_options(p, cursor, &tsresol, &tsoffset, errbuf) == -1)
+	if (process_idb_options(p, cursor, &tsresol, &tsoffset, &is_binary,
+	    errbuf) == -1)
 		return (0);
 
 	ps->ifaces[ps->ifcount - 1].tsresol = tsresol;
@@ -622,55 +691,40 @@ add_interface(pcap_t *p, struct block_cursor *cursor, char *errbuf)
 	 * Determine whether we're scaling up or down or not
 	 * at all for this interface.
 	 */
-	switch (p->opt.tstamp_precision) {
-
-	case PCAP_TSTAMP_PRECISION_MICRO:
-		if (tsresol == 1000000) {
+	if (tsresol == ps->user_tsresol) {
+		/*
+		 * The resolution is the resolution the user wants,
+		 * so we don't have to do scaling.
+		 */
+		ps->ifaces[ps->ifcount - 1].scale_type = PASS_THROUGH;
+	} else if (tsresol > ps->user_tsresol) {
+		/*
+		 * The resolution is greater than what the user wants,
+		 * so we have to scale the timestamps down.
+		 */
+		if (is_binary)
+			ps->ifaces[ps->ifcount - 1].scale_type = SCALE_DOWN_BIN;
+		else {
 			/*
-			 * The resolution is 1 microsecond,
-			 * so we don't have to do scaling.
+			 * Calculate the scale factor.
 			 */
-			ps->ifaces[ps->ifcount - 1].scale_type = PASS_THROUGH;
-		} else if (tsresol > 1000000) {
-			/*
-			 * The resolution is greater than
-			 * 1 microsecond, so we have to
-			 * scale the timestamps down.
-			 */
-			ps->ifaces[ps->ifcount - 1].scale_type = SCALE_DOWN;
-		} else {
-			/*
-			 * The resolution is less than 1
-			 * microsecond, so we have to scale
-			 * the timestamps up.
-			 */
-			ps->ifaces[ps->ifcount - 1].scale_type = SCALE_UP;
+			ps->ifaces[ps->ifcount - 1].scale_factor = tsresol/ps->user_tsresol;
+			ps->ifaces[ps->ifcount - 1].scale_type = SCALE_DOWN_DEC;
 		}
-		break;
-
-	case PCAP_TSTAMP_PRECISION_NANO:
-		if (tsresol == 1000000000) {
+	} else {
+		/*
+		 * The resolution is less than what the user wants,
+		 * so we have to scale the timestamps up.
+		 */
+		if (is_binary)
+			ps->ifaces[ps->ifcount - 1].scale_type = SCALE_UP_BIN;
+		else {
 			/*
-			 * The resolution is 1 nanosecond,
-			 * so we don't have to do scaling.
+			 * Calculate the scale factor.
 			 */
-			ps->ifaces[ps->ifcount - 1].scale_type = PASS_THROUGH;
-		} else if (tsresol > 1000000000) {
-			/*
-			 * The resolution is greater than
-			 * 1 nanosecond, so we have to
-			 * scale the timestamps down.
-			 */
-			ps->ifaces[ps->ifcount - 1].scale_type = SCALE_DOWN;
-		} else {
-			/*
-			 * The resolution is less than 1
-			 * nanosecond, so we have to scale
-			 * the timestamps up.
-			 */
-			ps->ifaces[ps->ifcount - 1].scale_type = SCALE_UP;
+			ps->ifaces[ps->ifcount - 1].scale_factor = ps->user_tsresol/tsresol;
+			ps->ifaces[ps->ifcount - 1].scale_type = SCALE_UP_DEC;
 		}
-		break;
 	}
 	return (1);
 }
@@ -693,9 +747,12 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 	struct pcap_ng_sf *ps;
 	int status;
 	struct block_cursor cursor;
-	struct interface_description_block *idbp = NULL;
+#ifdef __APPLE__
+    struct interface_description_block *idbp = NULL;
 	long file_offset = ftell(fp);
-        
+#else
+	struct interface_description_block *idbp;
+#endif /* __APPLE__ */
 	/*
 	 * Assume no read errors.
 	 */
@@ -703,7 +760,7 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 
 	/*
 	 * Check whether the first 4 bytes of the file are the block
-	 * type for a pcap-ng savefile. 
+	 * type for a pcap-ng savefile.
 	 */
 	if (magic != BT_SHB) {
 		/*
@@ -732,7 +789,7 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 	amt_read = fread(&total_length, 1, sizeof(total_length), fp);
 	if (amt_read < sizeof(total_length)) {
 		if (ferror(fp)) {
-			snprintf(errbuf, PCAP_ERRBUF_SIZE,
+			pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 			    "error reading dump file: %s",
 			    pcap_strerror(errno));
 			*err = 1;
@@ -748,7 +805,7 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 	amt_read = fread(&byte_order_magic, 1, sizeof(byte_order_magic), fp);
 	if (amt_read < sizeof(byte_order_magic)) {
 		if (ferror(fp)) {
-			snprintf(errbuf, PCAP_ERRBUF_SIZE,
+			pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 			    "error reading dump file: %s",
 			    pcap_strerror(errno));
 			*err = 1;
@@ -777,7 +834,7 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 	 * Check the sanity of the total length.
 	 */
 	if (total_length < sizeof(*bhdrp) + sizeof(*shbp) + sizeof(struct block_trailer)) {
-		snprintf(errbuf, PCAP_ERRBUF_SIZE,
+		pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 		    "Section Header Block in pcap-ng dump file has a length of %u < %lu",
 		    total_length,
 		    (unsigned long)(sizeof(*bhdrp) + sizeof(*shbp) + sizeof(struct block_trailer)));
@@ -812,7 +869,7 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 		break;
 
 	default:
-		snprintf(errbuf, PCAP_ERRBUF_SIZE,
+		pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 		    "unknown time stamp resolution %u", precision);
 		free(p);
 		*err = 1;
@@ -838,7 +895,7 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 		p->bufsize = total_length;
 	p->buffer = malloc(p->bufsize);
 	if (p->buffer == NULL) {
-		snprintf(errbuf, PCAP_ERRBUF_SIZE, "out of memory");
+		pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, "out of memory");
 		free(p);
 		*err = 1;
 		return (NULL);
@@ -849,12 +906,12 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 	 * of the SHB.
 	 */
 	bhdrp = (struct block_header *)p->buffer;
-	shbp = (struct section_header_block *)(p->buffer + sizeof(struct block_header));
+	shbp = (struct section_header_block *)((u_char *)p->buffer + sizeof(struct block_header));
 	bhdrp->block_type = magic;
 	bhdrp->total_length = total_length;
 	shbp->byte_order_magic = byte_order_magic;
 	if (read_bytes(fp,
-	    p->buffer + (sizeof(magic) + sizeof(total_length) + sizeof(byte_order_magic)),
+	    (u_char *)p->buffer + (sizeof(magic) + sizeof(total_length) + sizeof(byte_order_magic)),
 	    total_length - (sizeof(magic) + sizeof(total_length) + sizeof(byte_order_magic)),
 	    1, errbuf) == -1)
 		goto fail;
@@ -870,10 +927,12 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 		 * XXX - we don't care about the section length.
 		 */
 	}
-	if (shbp->major_version != PCAP_NG_VERSION_MAJOR) {
-		snprintf(errbuf, PCAP_ERRBUF_SIZE,
-		    "unknown pcap-ng savefile major version number %u",
-		    shbp->major_version);
+	/* currently only SHB version 1.0 is supported */
+	if (! (shbp->major_version == PCAP_NG_VERSION_MAJOR &&
+	       shbp->minor_version == PCAP_NG_VERSION_MINOR)) {
+		pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
+		    "unsupported pcap-ng savefile version %u.%u",
+		    shbp->major_version, shbp->minor_version);
 		goto fail;
 	}
 	p->version_major = shbp->major_version;
@@ -886,8 +945,6 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 
 	/*
 	 * Now start looking for an Interface Description Block.
-	 * It's OK not to have any interface description block as 
-	 * long as they are not needed by other block types
 	 */
 	for (;;) {
 		/*
@@ -896,7 +953,7 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 		status = read_block(fp, p, &cursor, errbuf);
 		if (status == 0) {
 			/* EOF - no IDB in this file */
-			snprintf(errbuf, PCAP_ERRBUF_SIZE,
+			pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 			    "the capture file has no Interface Description Blocks");
 			goto fail;
 		}
@@ -923,10 +980,32 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 			}
 
 			/*
+			 * Interface capture length sanity check
+			 */
+#ifdef __APPLE__
+				if (idbp->snaplen > MAXIMUM_SNAPLEN && idbp->snaplen != INT_MAX &&
+                    idbp->snaplen != UINT32_MAX) {
+					pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
+								  "invalid interface capture length %u, "
+								  "bigger than maximum of %u",
+								  idbp->snaplen, MAXIMUM_SNAPLEN);
+					goto fail;
+				}
+#else
+			if (idbp->snaplen > MAXIMUM_SNAPLEN) {
+				pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
+				    "invalid interface capture length %u, "
+				    "bigger than maximum of %u",
+				    idbp->snaplen, MAXIMUM_SNAPLEN);
+				goto fail;
+			}
+#endif /* __APPLE__ */
+			/*
 			 * Try to add this interface.
 			 */
 			if (!add_interface(p, &cursor, errbuf))
 				goto fail;
+
 			goto done;
 
 		case BT_EPB:
@@ -937,7 +1016,7 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 			 * not valid, as we don't know what link-layer
 			 * encapsulation the packet has.
 			 */
-			snprintf(errbuf, PCAP_ERRBUF_SIZE,
+			pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 			    "the capture file has a packet block before any Interface Description Blocks");
 			goto fail;
 
@@ -951,8 +1030,10 @@ pcap_ng_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,
 
 done:
 	p->tzoff = 0;	/* XXX - not used in pcap */
-	if (idbp != NULL) {
-		p->snapshot = idbp->snaplen;
+
+#ifdef __APPLE__
+    if (idbp != NULL) {
+		p->snapshot = MIN(idbp->snaplen, MAXIMUM_SNAPLEN);
 		p->linktype = linktype_to_dlt(idbp->linktype);
 	} else {
 		/*
@@ -961,28 +1042,36 @@ done:
 		p->snapshot = 65536;
 		p->linktype = linktype_to_dlt(DLT_NULL);
 	}
-	
+#else
+	p->snapshot = idbp->snaplen;
+	p->linktype = linktype_to_dlt(idbp->linktype);
+#endif /* __APPLE__ */
+    
 	p->linktype_ext = 0;
 
 	p->next_packet_op = pcap_ng_next_packet;
 	
-	/*
-	 * Special using block based API
-	 */
-	if (isng) {
-		p->next_packet_op = pcap_ng_next_block;
-		/*
-		 * Rewind to begining of Section Header Block
-		 */
-		if (file_offset < 4) {
-			snprintf(errbuf, PCAP_ERRBUF_SIZE, "bad file offset");
-			goto fail;
-		}
-		file_offset -= 4;
-		fseek(fp, file_offset, SEEK_SET);
-		
-		p->linktype = DLT_PCAPNG;
-	}
+	p->cleanup_op = pcap_ng_cleanup;
+
+#ifdef __APPLE__
+    /*
+     * Special using block based API
+     */
+    if (isng) {
+        p->next_packet_op = pcap_ng_next_block;
+        /*
+         * Rewind to begining of Section Header Block
+         */
+        if (file_offset < 4) {
+            snprintf(errbuf, PCAP_ERRBUF_SIZE, "bad file offset");
+            goto fail;
+        }
+        file_offset -= 4;
+        fseek(fp, file_offset, SEEK_SET);
+        
+        p->linktype = DLT_PCAPNG;
+    }
+#endif /* __APPLE__ */
 
 	return (p);
 
@@ -994,13 +1083,16 @@ fail:
 	return (NULL);
 }
 
+#ifdef __APPLE__
 void
+#else
+static void
+#endif /* __APPLE__ */
 pcap_ng_cleanup(pcap_t *p)
 {
 	struct pcap_ng_sf *ps = p->priv;
 
 	free(ps->ifaces);
-
 	sf_cleanup(p);
 }
 
@@ -1035,8 +1127,22 @@ pcap_ng_next_internal(pcap_t *p, struct pcap_pkthdr *hdr, u_char **data, int pkt
 	struct section_header_block *shbp;
 	FILE *fp = p->rfile;
 	u_int64_t t, sec, frac;
-	struct option_header *opthdr;
+
+#ifdef __APPLE__
+    struct option_header *opthdr;
 	unsigned char packetpad;
+
+	/*
+	 * To silence Xcode static analyzer that doesn't know this depends on pcap_ng_check_header
+	 * that initialized user_tsresol to non-zero value
+	 */
+	if (ps->user_tsresol == 0) {
+		pcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
+					  "internal error, check_header did not set user_tsresol");
+		return (-1);
+	}
+#endif /* __APPLE__ */
+
 	/*
 	 * Look for an Enhanced Packet Block, a Simple Packet Block,
 	 * or a Packet Block.
@@ -1081,7 +1187,7 @@ pcap_ng_next_internal(pcap_t *p, struct pcap_pkthdr *hdr, u_char **data, int pkt
 				    epbp->timestamp_low;
 			}
 			goto found;
-			
+
 		case BT_SPB:
 			/*
 			 * Get a pointer to the fixed-length portion of the
@@ -1113,7 +1219,7 @@ pcap_ng_next_internal(pcap_t *p, struct pcap_pkthdr *hdr, u_char **data, int pkt
 			 * and the packet length.
 			 */
 			hdr->caplen = hdr->len;
-			if (hdr->caplen > p->snapshot)
+			if (hdr->caplen > (bpf_u_int32)p->snapshot)
 				hdr->caplen = p->snapshot;
 			t = 0;	/* no time stamps */
 			goto found;
@@ -1174,13 +1280,13 @@ pcap_ng_next_internal(pcap_t *p, struct pcap_pkthdr *hdr, u_char **data, int pkt
 			 * interfaces?
 			 */
 			if (p->linktype != idbp->linktype && pktonly) {
-				snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
+				pcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
 				    "an interface has a type %u different from the type of the first interface",
 				    idbp->linktype);
 				return (-1);
 			}
-			if (p->snapshot != idbp->snaplen && pktonly) {
-				snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
+			if ((bpf_u_int32)p->snapshot != idbp->snaplen && pktonly) {
+				pcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
 				    "an interface has a snapshot length %u different from the type of the first interface",
 				    idbp->snaplen);
 				return (-1);
@@ -1232,7 +1338,7 @@ pcap_ng_next_internal(pcap_t *p, struct pcap_pkthdr *hdr, u_char **data, int pkt
 				/*
 				 * Byte order changes.
 				 */
-				snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
+				pcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
 				    "the file has sections with different byte orders");
 				return (-1);
 
@@ -1240,7 +1346,7 @@ pcap_ng_next_internal(pcap_t *p, struct pcap_pkthdr *hdr, u_char **data, int pkt
 				/*
 				 * Not a valid SHB.
 				 */
-				snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
+				pcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
 				    "the file has a section with a bad byte order magic field");
 				return (-1);
 			}
@@ -1250,7 +1356,7 @@ pcap_ng_next_internal(pcap_t *p, struct pcap_pkthdr *hdr, u_char **data, int pkt
 			 * we handle.
 			 */
 			if (shbp->major_version != PCAP_NG_VERSION_MAJOR) {
-				snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
+				pcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
 				    "unknown pcap-ng savefile major version number %u",
 				    shbp->major_version);
 				return (-1);
@@ -1274,8 +1380,11 @@ pcap_ng_next_internal(pcap_t *p, struct pcap_pkthdr *hdr, u_char **data, int pkt
 			 */
 			break;
 		}
+
+#ifdef __APPLE__
 		if (pktonly == 0)
 			return (0);
+#endif /* __APPLE__ */
 	}
 
 found:
@@ -1286,7 +1395,7 @@ found:
 		/*
 		 * Yes.  Fail.
 		 */
-		snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
+		pcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
 		    "a packet arrived on interface %u, but there's no Interface Description Block for that interface",
 		    interface_id);
 		return (-1);
@@ -1312,11 +1421,71 @@ found:
 		 */
 		break;
 
-	case SCALE_UP:
-	case SCALE_DOWN:
+	case SCALE_UP_DEC:
 		/*
-		 * The interface resolution is different from what the
-		 * user wants; convert the fractions to units of the
+		 * The interface resolution is less than what the user
+		 * wants; scale the fractional part up to the units of
+		 * the resolution the user requested by multiplying by
+		 * the quotient of the user-requested resolution and the
+		 * file-supplied resolution.
+		 *
+		 * Those resolutions are both powers of 10, and the user-
+		 * requested resolution is greater than the file-supplied
+		 * resolution, so the quotient in question is an integer.
+		 * We've calculated that quotient already, so we just
+		 * multiply by it.
+		 */
+		frac *= ps->ifaces[interface_id].scale_factor;
+		break;
+
+	case SCALE_UP_BIN:
+		/*
+		 * The interface resolution is less than what the user
+		 * wants; scale the fractional part up to the units of
+		 * the resolution the user requested by multiplying by
+		 * the quotient of the user-requested resolution and the
+		 * file-supplied resolution.
+		 *
+		 * The file-supplied resolution is a power of 2, so the
+		 * quotient is not an integer, so, in order to do this
+		 * entirely with integer arithmetic, we multiply by the
+		 * user-requested resolution and divide by the file-
+		 * supplied resolution.
+		 *
+		 * XXX - Is there something clever we could do here,
+		 * given that we know that the file-supplied resolution
+		 * is a power of 2?  Doing a multiplication followed by
+		 * a division runs the risk of overflowing, and involves
+		 * two non-simple arithmetic operations.
+		 */
+		frac *= ps->user_tsresol;
+		frac /= ps->ifaces[interface_id].tsresol;
+		break;
+
+	case SCALE_DOWN_DEC:
+		/*
+		 * The interface resolution is greater than what the user
+		 * wants; scale the fractional part up to the units of
+		 * the resolution the user requested by multiplying by
+		 * the quotient of the user-requested resolution and the
+		 * file-supplied resolution.
+		 *
+		 * Those resolutions are both powers of 10, and the user-
+		 * requested resolution is less than the file-supplied
+		 * resolution, so the quotient in question isn't an
+		 * integer, but its reciprocal is, and we can just divide
+		 * by the reciprocal of the quotient.  We've calculated
+		 * the reciprocal of that quotient already, so we must
+		 * divide by it.
+		 */
+		frac /= ps->ifaces[interface_id].scale_factor;
+		break;
+
+
+	case SCALE_DOWN_BIN:
+		/*
+		 * The interface resolution is greater than what the user
+		 * wants; convert the fractional part to units of the
 		 * resolution the user requested by multiplying by the
 		 * quotient of the user-requested resolution and the
 		 * file-supplied resolution.  We do that by multiplying
@@ -1324,24 +1493,39 @@ found:
 		 * file-supplied resolution, as the quotient might not
 		 * fit in an integer.
 		 *
-		 * XXX - if ps->ifaces[interface_id].tsresol is a power
-		 * of 10, we could just multiply by the quotient of
-		 * ps->user_tsresol and ps->ifaces[interface_id].tsresol
-		 * in the scale-up case, and divide by the quotient of
-		 * ps->ifaces[interface_id].tsresol and ps->user_tsresol
-		 * in the scale-down case, as we know those will be integers.
-		 * That would involve fewer arithmetic operations, and
-		 * would run less risk of overflow.
+		 * The file-supplied resolution is a power of 2, so the
+		 * quotient is not an integer, and neither is its
+		 * reciprocal, so, in order to do this entirely with
+		 * integer arithmetic, we multiply by the user-requested
+		 * resolution and divide by the file-supplied resolution.
 		 *
-		 * Is there something clever we could do if
-		 * ps->ifaces[interface_id].tsresol is a power of 2?
+		 * XXX - Is there something clever we could do here,
+		 * given that we know that the file-supplied resolution
+		 * is a power of 2?  Doing a multiplication followed by
+		 * a division runs the risk of overflowing, and involves
+		 * two non-simple arithmetic operations.
 		 */
 		frac *= ps->user_tsresol;
 		frac /= ps->ifaces[interface_id].tsresol;
 		break;
 	}
-	hdr->ts.tv_sec = sec;
-	hdr->ts.tv_usec = (int32_t)frac;
+#ifdef _WIN32
+	/*
+	 * tv_sec and tv_used in the Windows struct timeval are both
+	 * longs.
+	 */
+	hdr->ts.tv_sec = (long)sec;
+	hdr->ts.tv_usec = (long)frac;
+#else
+	/*
+	 * tv_sec in the UN*X struct timeval is a time_t; tv_usec is
+	 * suseconds_t in UN*Xes that work the way the current Single
+	 * UNIX Standard specify - but not all older UN*Xes necessarily
+	 * support that type, so just cast to int.
+	 */
+	hdr->ts.tv_sec = (time_t)sec;
+	hdr->ts.tv_usec = (int)frac;
+#endif
 
 	/*
 	 * Get a pointer to the packet data.
@@ -1438,16 +1622,23 @@ sf_ng_write_header(FILE *fp, int linktype, int thiszone, int snaplen)
 static pcap_dumper_t *
 pcap_ng_setup_dump(pcap_t *p, int linktype, FILE *f, const char *fname)
 {
-	if (sf_ng_write_header(f, linktype, p->tzoff, p->snapshot) == -1) {
+	pcap_dumper_t *dumper;
+
+	dumper = pcap_alloc_dumper(p,f);
+	if (dumper == NULL)
+		return (NULL);
+
+	if (sf_ng_write_header(dumper->f, linktype, p->tzoff, p->snapshot) == -1) {
 		snprintf(p->errbuf, PCAP_ERRBUF_SIZE, "Can't write to %s: %s",
 			 fname, pcap_strerror(errno));
-		if (f != stdout)
-			(void)fclose(f);
+		pcap_dump_close(dumper);
 		return (NULL);
 	}
-	fflush(f);
+	fflush(dumper->f);
 	p->shb_added = 1;
-	return ((pcap_dumper_t *)f);
+	dumper->shb_added = 1;
+
+	return (dumper);
 }
 
 pcap_dumper_t *
@@ -1503,7 +1694,7 @@ pcap_ng_dump_open(pcap_t *p, const char *fname)
 		
 		return (pcap_ng_setup_dump(p, linktype, f, fname));
 	} else {
-		return ((pcap_dumper_t *)f);
+		return (pcap_alloc_dumper(p, f));
 	}
 }
 
@@ -1573,7 +1764,7 @@ pcap_ng_dump(u_char *user, const struct pcap_pkthdr *h, const u_char *sp)
 	
 	bt.total_length = (bpf_u_int32)len;
 	
-	f = (FILE *)user;
+	f = ((pcap_dumper_t *)user)->f;
 	/* XXX we should check the return status */
 	/* Header */
 	(void)fwrite(&bh, sizeof(bh), 1, f);

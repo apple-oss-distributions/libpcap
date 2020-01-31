@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2015 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2018 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -70,6 +70,7 @@ unsigned char *packet_data = NULL;
 size_t packet_length = 0;
 unsigned long num_data_blocks = 1;
 int copy_data_buffer = 0;
+int verbose = 0;
 
 void hex_and_ascii_print(const char *, const void *, size_t, const char *);
 
@@ -121,8 +122,11 @@ make_interface_description_block(const char *name)
 	struct pcapng_interface_description_fields *idb_fields;
 	pcapng_block_t block = pcap_ng_block_alloc(pcap_ng_block_size_max());
 
+	if (verbose)
+		printf("%s\n", __func__);
+
 	pcap_ng_block_reset(block, PCAPNG_BT_IDB);
-	
+
 	if (first_comment && comment)
 		pcap_ng_block_add_option_with_string(block, PCAPNG_OPT_COMMENT, comment);
 	
@@ -138,13 +142,17 @@ make_interface_description_block(const char *name)
 	write_block(block);
 
 	pcap_ng_free_block(block);
+
 }
 
 void
-make_process_information_block(const char *name, uint32_t pid, uuid_t uu)
+make_process_information_block(const char *name, uint32_t pid, const uuid_t uu)
 {
 	struct pcapng_process_information_fields *pib_fields;
 	pcapng_block_t block = pcap_ng_block_alloc(pcap_ng_block_size_max());
+
+	if (verbose)
+		printf("%s\n", __func__);
 
 	pcap_ng_block_reset(block, PCAPNG_BT_PIB);
 
@@ -174,7 +182,10 @@ make_kern_event_block(struct kern_event_msg *event)
 	struct pcapng_os_event_fields *osev_fields;
 	struct timeval ts;
 	pcapng_block_t block = pcap_ng_block_alloc(pcap_ng_block_size_max());
-	
+
+	if (verbose)
+		printf("%s\n", __func__);
+
 	gettimeofday(&ts, NULL);
 	
 	pcap_ng_block_reset(block, PCAPNG_BT_OSEV);
@@ -201,13 +212,15 @@ make_kern_event_block(struct kern_event_msg *event)
 	pcap_ng_free_block(block);
 }
 
-
 void
 make_data_block(const void *data, size_t len)
 {
 	unsigned int i;
 	
 	for (i = 0; i < num_data_blocks; i++) {
+		if (verbose)
+			printf("%s\n", __func__);
+		
 		switch (type_of_packet) {
 			case SIMPLE_PACKET: {
 				pcapng_block_t block = pcap_ng_block_alloc(pcap_ng_block_size_max());
@@ -232,6 +245,10 @@ make_data_block(const void *data, size_t len)
 			}
 			case ENHANCED_PACKET: {
 				struct pcapng_enhanced_packet_fields *epb_fields;
+				uint32_t pktflags = PCAPNG_PBF_DIR_OUTBOUND | PCAPNG_PBF_DIR_INBOUND;
+				uint32_t pmdflags = PCAPNG_EPB_PMDF_NEW_FLOW | PCAPNG_EPB_PMDF_REXMIT |
+					PCAPNG_EPB_PMDF_KEEP_ALIVE | PCAPNG_EPB_PMDF_SOCKET | PCAPNG_EPB_PMDF_NEXUS_CHANNEL;
+
 				pcapng_block_t block = pcap_ng_block_alloc(pcap_ng_block_size_max());
 				
 				pcap_ng_block_reset(block, PCAPNG_BT_EPB);
@@ -256,6 +273,10 @@ make_data_block(const void *data, size_t len)
 				}
 				if (!first_comment && comment)
 					pcap_ng_block_add_option_with_string(block, PCAPNG_OPT_COMMENT, comment);
+
+				pcap_ng_block_add_option_with_value(block, PCAPNG_EPB_FLAGS , &pktflags, 4);
+
+				pcap_ng_block_add_option_with_value(block, PCAPNG_EPB_PMD_FLAGS, &pmdflags, 4);
 				
 				write_block(block);
 
@@ -270,8 +291,8 @@ make_data_block(const void *data, size_t len)
 				bzero(&h, sizeof(struct pcap_pkthdr));
 				h.ts.tv_sec = 10000;
 				h.ts.tv_usec = 2000;
-				h.caplen = sizeof(struct pktap_header) + len;
-				h.len = sizeof(struct pktap_header) + len;
+				h.caplen = (bpf_u_int32) (sizeof(struct pktap_header) + len);
+				h.len = (bpf_u_int32) (sizeof(struct pktap_header) + len);
 				
 				pktp_hdr = (struct pktap_header *)buffer;
 				bzero(pktp_hdr, sizeof(struct pktap_header));
@@ -305,6 +326,9 @@ make_section_header_block()
 {
 	pcapng_block_t block = pcap_ng_block_alloc(pcap_ng_block_size_max());
 	
+	if (verbose)
+		printf("%s\n", __func__);
+
 	pcap_ng_block_reset(block, PCAPNG_BT_SHB);
 	
 	pcap_ng_block_add_option_with_string(block, PCAPNG_OPT_COMMENT,
@@ -319,6 +343,9 @@ void
 make_name_resolution_record(int af, void *addr, char **names)
 {
 	pcapng_block_t block = pcap_ng_block_alloc(pcap_ng_block_size_max());
+
+	if (verbose)
+		printf("%s\n", __func__);
 
 	pcap_ng_block_reset(block, PCAPNG_BT_NRB);
 
@@ -344,7 +371,6 @@ main(int argc, char * const argv[])
 {
 	int ch;
 	const char *file_name = NULL;
-	pcapng_block_t block;
 	int kevid = 0;
 	
     if (argc == 1) {
@@ -356,7 +382,7 @@ main(int argc, char * const argv[])
 	 * Loop through argument to build PCAP-NG block
 	 * Optionally write to file
 	 */
-	while ((ch = getopt(argc, argv, "4:6:Cc:D:d:fk:hi:n:p:t:w:x")) != -1) {
+	while ((ch = getopt(argc, argv, "4:6:Cc:D:d:fk:hi:n:p:t:w:xv")) != -1) {
 		switch (ch) {
 			case 'C':
 				copy_data_buffer = 1;
@@ -391,7 +417,6 @@ main(int argc, char * const argv[])
 
 			case 'k': {
 				struct kern_event_msg *kevmsg = NULL;
-				struct net_event_data *net_data;
 				u_long len;
 				
 				len = strtoul(optarg, NULL, 0);
@@ -407,7 +432,6 @@ main(int argc, char * const argv[])
 				kevmsg->kev_subclass = KEV_DL_SUBCLASS;
 				kevmsg->id = kevid++;
 				kevmsg->event_code = KEV_DL_LINK_QUALITY_METRIC_CHANGED;
-				net_data = (struct net_event_data *) &kevmsg->event_data[0];
 
 				make_kern_event_block(kevmsg);
 				free(kevmsg);
@@ -481,7 +505,6 @@ main(int argc, char * const argv[])
 					make_name_resolution_record(af,  &ina, names);
 				else
 					make_name_resolution_record(af, &in6a, names);
-				pcap_ng_free_block(block);
 				break;
 			}
 				
@@ -524,7 +547,7 @@ main(int argc, char * const argv[])
 						if (*ep || ep == optarg) {
 							fprintf(stderr, "malformed pid for option 'p'\n");
 							help(argv[0]);
-							return (0);
+							exit (0);
 						}
 					}
 					if ((str = strsep(&ptr, ":")) == NULL)
@@ -537,8 +560,9 @@ main(int argc, char * const argv[])
 						}
 					}
 				} while (0);
+				free(proc_name);
 				free(tofree);
-				
+
 				proc_index += 1;
 				
 				make_process_information_block(proc_name, proc_pid, proc_uuid);
@@ -554,7 +578,12 @@ main(int argc, char * const argv[])
 					type_of_packet = OBSOLETE_PACKET;
 				else if (*optarg == 'p')
 					type_of_packet = PKTAP_PACKET;
-				
+				break;
+
+			case 'v':
+				verbose++;
+				break;
+
 			case 'w':
 				file_name = optarg;
 				
