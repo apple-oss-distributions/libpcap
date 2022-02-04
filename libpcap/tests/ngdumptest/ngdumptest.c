@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <sys/errno.h>
 #include <stdio.h>
 #include <err.h>
 #include <sysexits.h>
@@ -72,6 +73,17 @@ unsigned long num_data_blocks = 1;
 int copy_data_buffer = 0;
 int verbose = 0;
 
+/* Flags used to override the default value of the section header block */
+#define SHBF_MAGIC  0x01
+#define SHBF_MAJOR  0x02
+#define SHBF_MINOR  0x04
+#define SHBF_LENGTH 0x05
+unsigned int shb_flags = 0;
+uint32_t shb_byte_order_magic = 0;
+uint16_t shb_major_version = 0;
+uint16_t shb_minor_version = 0;
+uint64_t shb_section_length = 0;
+
 void hex_and_ascii_print(const char *, const void *, size_t, const char *);
 
 void
@@ -87,12 +99,15 @@ help(const char *str)
 	printf(" %-36s # %s\n", "-d string", "packet data as a string");
 	printf(" %-36s # %s\n", "-f", "first comment option");
 	printf(" %-36s # %s\n", "-k len", "kernel event of given len");
+	printf(" %-36s # %s\n", "-h", "display this help and exit");
 	printf(" %-36s # %s\n", "-i name", "interface name");
 	printf(" %-36s # %s\n", "-n num_data", "number of data blocks");
 	printf(" %-36s # %s\n", "-p name:pid:uuid", "process name, pid and uuid");
-	printf(" %-36s # %s\n", "-p type:data", "secrets type (number), secrets data (string)");
+	printf(" %-36s # %s\n", "-S [magic:major:minor:length]", "section header");
+	printf(" %-36s # %s\n", "-s type:data", "secrets type (number), secrets data (string)");
 	printf(" %-36s # %s\n", "-t (simple|enhanced|obsolote|pktap)", "type of packet");
 	printf(" %-36s # %s\n", " ", "note obsolete is not implemented");
+	printf(" %-36s # %s\n", "-v", "increase verbosity");
 	printf(" %-36s # %s\n", "-w name", "packet capture file name");
 	printf(" %-36s # %s\n", "-x [buffer_length]", "externalize in buffer of given length");
 }
@@ -280,7 +295,8 @@ make_data_block(const void *data, size_t len)
 				struct pcapng_enhanced_packet_fields *epb_fields;
 				uint32_t pktflags = PCAPNG_PBF_DIR_OUTBOUND | PCAPNG_PBF_DIR_INBOUND;
 				uint32_t pmdflags = PCAPNG_EPB_PMDF_NEW_FLOW | PCAPNG_EPB_PMDF_REXMIT |
-					PCAPNG_EPB_PMDF_KEEP_ALIVE | PCAPNG_EPB_PMDF_SOCKET | PCAPNG_EPB_PMDF_NEXUS_CHANNEL;
+					PCAPNG_EPB_PMDF_KEEP_ALIVE | PCAPNG_EPB_PMDF_SOCKET | PCAPNG_EPB_PMDF_NEXUS_CHANNEL |
+					PCAPNG_EPB_PMDF_WAKE_PKT;
 
 				pcapng_block_t block = pcap_ng_block_alloc(pcap_ng_block_size_max());
 				
@@ -363,10 +379,25 @@ make_section_header_block()
 		printf("%s\n", __func__);
 
 	pcap_ng_block_reset(block, PCAPNG_BT_SHB);
-	
+
+	struct pcapng_section_header_fields *shb_fields = pcap_ng_get_section_header_fields(block);
+
+	if (shb_flags & SHBF_MAGIC) {
+		shb_fields->byte_order_magic = shb_byte_order_magic;
+	}
+	if (shb_flags & SHBF_MAJOR) {
+		shb_fields->major_version = shb_major_version;
+	}
+	if (shb_flags & SHBF_MINOR) {
+		shb_fields->minor_version = shb_minor_version;
+	}
+	if (shb_flags & SHBF_LENGTH) {
+		shb_fields->section_length = shb_section_length;
+	}
+
 	pcap_ng_block_add_option_with_string(block, PCAPNG_OPT_COMMENT,
 					     "section header block");
-	
+
 	write_block(block);
 	
 	pcap_ng_free_block(block);
@@ -399,6 +430,36 @@ make_name_resolution_record(int af, void *addr, char **names)
 	pcap_ng_free_block(block);
 }
 
+unsigned long
+parse_ulong(char opt, const char *str, unsigned long maxval)
+{
+	char *ep;
+	unsigned long ulval = strtoul(str, &ep, 0);
+	if (*ep != 0) {
+		errx(1, "-%c bad argument '%s'", opt, str);
+	} else if (ulval == ULONG_MAX && errno == ERANGE) {
+		errx(1, "-%c bad argument '%s'", opt, str);
+	} else if (ulval == 0 && errno == EINVAL) {
+		errx(1, "-%c bad argument '%s'", opt, str);
+	}
+	return ulval;
+}
+
+unsigned long long
+parse_ulonglong(char opt, const char *str, unsigned long long maxval)
+{
+	char *ep;
+	unsigned long long ullval = strtoull(str, &ep, 0);
+	if (*ep != 0) {
+		errx(EX_USAGE, "-%c bad argument '%s'", opt, str);
+	} else if (ullval == ULLONG_MAX && errno == ERANGE) {
+		errx(EX_USAGE, "-%c bad argument '%s'", opt, str);
+	} else if (ullval == 0 && errno == EINVAL) {
+		errx(EX_OSERR, "-%c bad argument '%s'", opt, str);
+	}
+	return ullval;
+}
+
 int
 main(int argc, char * const argv[])
 {
@@ -406,16 +467,16 @@ main(int argc, char * const argv[])
 	const char *file_name = NULL;
 	int kevid = 0;
 	
-    if (argc == 1) {
-        help(argv[0]);
-        return (0);
-    }
-    
+	if (argc == 1) {
+		help(argv[0]);
+		return (0);
+	}
+
 	/*
 	 * Loop through argument to build PCAP-NG block
 	 * Optionally write to file
 	 */
-	while ((ch = getopt(argc, argv, "4:6:Cc:D:d:fk:hi:n:p:s:t:w:xv")) != -1) {
+	while ((ch = getopt(argc, argv, "4:6:Cc:D:d:fk:hi:n:p:S:s:t:w:xv")) != -1) {
 		switch (ch) {
 			case 'C':
 				copy_data_buffer = 1;
@@ -517,10 +578,10 @@ main(int argc, char * const argv[])
 				}
 				if (retval == 0)
 					errx(1, "This is not an %s address: '%s'\n",
-						 af == AF_INET ? "IPv4" : "IPv6",
-						 optarg);
+					     af == AF_INET ? "IPv4" : "IPv6",
+					     optarg);
 				else if (retval == -1)
-					err(1, "inet_pton(%s) failed\n", optarg);
+					err(EX_OSERR, "inet_pton(%s) failed\n", optarg);
 				
 				for (i = 0; i < name_count; i++) {
 					char *end;
@@ -602,6 +663,55 @@ main(int argc, char * const argv[])
 				
 				break;
 			}
+			case 'S': {
+				char *ptr;
+				char *tofree;
+
+				shb_flags = 0;
+
+				tofree = strdup(optarg);
+				if (tofree == NULL)
+					errx(EX_OSERR, "### strdup() failed");
+				ptr = tofree;
+
+				do {
+					char *str;
+
+					if ((str = strsep(&ptr, ":")) == NULL) {
+						errx(1, "-S argument missing");
+					}
+					if (*str != 0) {
+						shb_byte_order_magic = (uint32_t)parse_ulong(ch, str, UINT32_MAX);
+						shb_flags |= SHBF_MAGIC;
+					}
+					if ((str = strsep(&ptr, ":")) == NULL) {
+						break;
+					}
+					if (*str != 0) {
+						shb_major_version = (uint16_t)parse_ulong(ch, str, UINT16_MAX);
+						shb_flags |= SHBF_MAJOR;
+					}
+					if ((str = strsep(&ptr, ":")) == NULL) {
+						break;
+					}
+					if (*str != 0) {
+						shb_minor_version = (uint16_t)parse_ulong(ch, str, UINT16_MAX);
+						shb_flags |= SHBF_MINOR;
+					}
+					if ((str = strsep(&ptr, ":")) == NULL) {
+						break;
+					}
+					if (*str != 0) {
+						shb_major_version = (uint64_t)parse_ulonglong(ch, str, UINT64_MAX);
+						shb_flags |= SHBF_LENGTH;
+					}
+				} while (0);
+				free(tofree);
+
+				make_section_header_block();
+
+				break;
+			}
 			case 's': {
 				char *ptr;
 				char *tofree;
@@ -669,9 +779,6 @@ main(int argc, char * const argv[])
 				dumper = pcap_ng_dump_open(pcap, file_name);
 				if (pcap == NULL)
 					err(EX_OSERR,  "pcap_ng_dump_open(%s) failed\n", file_name);
-
-				
-				make_section_header_block();
 				break;
 
 			case 'x':
@@ -694,7 +801,7 @@ main(int argc, char * const argv[])
 				return (0);
 		}
 	}
-		
+
 	if (dumper != NULL)
 		pcap_ng_dump_close(dumper);
 	

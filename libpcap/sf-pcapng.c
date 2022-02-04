@@ -40,6 +40,7 @@
 #ifdef __APPLE__
 #include "pcap-util.h"
 #include <limits.h>
+#include <net/if.h>
 
 #ifndef MIN
 #define MIN(a,b) ((a)<(b)?(a):(b))
@@ -110,7 +111,8 @@ struct section_header_block {
 
 /*
  * Current version number.  If major_version isn't PCAP_NG_VERSION_MAJOR,
- * that means that this code can't read the file.
+ * or if minor_version isn't PCAP_NG_VERSION_MINOR or 2, that means that
+ * this code can't read the file.
  */
 #define PCAP_NG_VERSION_MAJOR	1
 #define PCAP_NG_VERSION_MINOR	0
@@ -1008,9 +1010,23 @@ pcap_ng_check_header(const uint8_t *magic, FILE *fp, u_int precision,
 		 * XXX - we don't care about the section length.
 		 */
 	}
-	/* currently only SHB version 1.0 is supported */
+	/* Currently only SHB versions 1.0 and 1.2 are supported;
+	   version 1.2 is treated as being the same as version 1.0.
+	   See the current version of the pcapng specification.
+
+	   Version 1.2 is written by some programs that write additional
+	   block types (which can be read by any code that handles them,
+	   regardless of whether the minor version if 0 or 2, so that's
+	   not a reason to change the minor version number).
+
+	   XXX - the pcapng specification says that readers should
+	   just ignore sections with an unsupported version number;
+	   presumably they can also report an error if they skip
+	   all the way to the end of the file without finding
+	   any versions that they support. */
 	if (! (shbp->major_version == PCAP_NG_VERSION_MAJOR &&
-	       shbp->minor_version == PCAP_NG_VERSION_MINOR)) {
+	       (shbp->minor_version == PCAP_NG_VERSION_MINOR ||
+	        shbp->minor_version == 2))) {
 		pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,
 		    "unsupported pcapng savefile version %u.%u",
 		    shbp->major_version, shbp->minor_version);
@@ -1652,82 +1668,36 @@ found:
 
 #ifdef __APPLE__
 
-static int
-sf_ng_write_header(FILE *fp, int linktype, int thiszone, int snaplen)
-{
-	struct pcapng_block_header bh;
-	struct pcapng_section_header_fields shb;
-	struct pcapng_interface_description_fields idb;
-	struct pcapng_block_trailer bt;
-	size_t len;
-	
-	/*
-	 * Section Header Block
-	 */
-	len = sizeof(bh) + sizeof(shb) + sizeof(bt);
-	bh.block_type   = PCAPNG_BT_SHB;
-	bh.total_length = (bpf_u_int32)len;
-	
-	shb.byte_order_magic = PCAPNG_BYTE_ORDER_MAGIC;
-	shb.major_version    = PCAPNG_VERSION_MAJOR;
-	shb.minor_version    = 0;
-	shb.section_length   = 0xFFFFFFFFFFFFFFFF;
-	
-	bt.total_length = (bpf_u_int32)len;
-	
-	if (fwrite((char *)&bh, sizeof(bh), 1, fp) != 1)
-		return (-1);
-	
-	if (fwrite((char *)&shb, sizeof(shb), 1, fp) != 1)
-		return (-1);
-	
-	if (fwrite((char *)&bt, sizeof(bt), 1, fp) != 1)
-		return (-1);
-	
-	/*
-	 * Interface Description Block
-	 */
-	len = sizeof(bh) + sizeof(idb) + sizeof(bt);
-	bh.block_type   = PCAPNG_BT_IDB;
-	bh.total_length = (bpf_u_int32)len;
-	
-	idb.idb_reserved = 0;
-	idb.idb_linktype = linktype;
-	idb.idb_snaplen  = snaplen;
-	
-	bt.total_length = (bpf_u_int32)len;
-	
-	if (fwrite((char *)&bh, sizeof(bh), 1, fp) != 1)
-		return (-1);
-	
-	if (fwrite((char *)&idb, sizeof(idb), 1, fp) != 1)
-		return (-1);
-	
-	if (fwrite((char *)&bt, sizeof(bt), 1, fp) != 1)
-		return (-1);
-	
-	return (0);
-}
-
 static pcap_dumper_t *
-pcap_ng_setup_dump(pcap_t *p, int linktype, FILE *f, const char *fname)
+pcap_ng_setup_dump(pcap_t *pcap, int linktype, FILE *f, const char *fname)
 {
 	pcap_dumper_t *dumper;
-
-	dumper = pcap_alloc_dumper(p,f);
+	struct pcap_if_info *if_info;
+	
+	dumper = pcap_alloc_dumper(pcap,f);
 	if (dumper == NULL)
 		return (NULL);
-
-	if (sf_ng_write_header(dumper->f, linktype, p->tzoff, p->snapshot) == -1) {
-		snprintf(p->errbuf, PCAP_ERRBUF_SIZE, "Can't write to %s: %s",
-			 fname, pcap_strerror(errno));
-		pcap_dump_close(dumper);
-		return (NULL);
+	
+	if (pcap_ng_dump_shb(pcap, dumper) == 0)
+		return (0);
+	
+	/*
+	 * Add an interface info block for a new interface before filtering
+	 */
+	if_info = pcap_if_info_set_add(&dumper->dump_if_info_set, pcap->opt.device, -1,
+								   pcap->linktype, pcap->snapshot,
+								   pcap->filter_str, pcap->errbuf);
+	if (if_info == NULL) {
+		return (0);
 	}
-	fflush(dumper->f);
-	p->shb_added = 1;
-	dumper->shb_added = 1;
-
+	/*
+	 * Dump the interface info block
+	 */
+	if_info = pcap_ng_dump_if_info(pcap, dumper, dumper->dump_block, if_info);
+	if (if_info == NULL) {
+		return (0);
+	}
+	
 	return (dumper);
 }
 
@@ -1743,8 +1713,8 @@ pcap_ng_dump_open(pcap_t *p, const char *fname)
 	 */
 	if (!p->activated) {
 		snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
-			 "%s: not-yet-activated pcap_t passed to pcap_ng_dump_open",
-			 fname);
+				 "%s: not-yet-activated pcap_t passed to pcap_ng_dump_open",
+				 fname);
 		return (NULL);
 	}
 	
@@ -1755,7 +1725,7 @@ pcap_ng_dump_open(pcap_t *p, const char *fname)
 		f = fopen(fname, "wb");
 		if (f == NULL) {
 			snprintf(p->errbuf, PCAP_ERRBUF_SIZE, "%s: %s",
-				 fname, pcap_strerror(errno));
+					 fname, pcap_strerror(errno));
 			return (NULL);
 		}
 	}
@@ -1774,8 +1744,8 @@ pcap_ng_dump_open(pcap_t *p, const char *fname)
 		linktype = dlt_to_linktype(p->linktype);
 		if (linktype == -1) {
 			snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
-				 "%s: link-layer type %d isn't supported in savefiles",
-				 fname, p->linktype);
+					 "%s: link-layer type %d isn't supported in savefiles",
+					 fname, p->linktype);
 			if (f != stdout)
 				fclose(f);
 			return (NULL);
@@ -1796,8 +1766,8 @@ pcap_ng_dump_fopen(pcap_t *p, FILE *f)
 	linktype = dlt_to_linktype(p->linktype);
 	if (linktype == -1) {
 		snprintf(p->errbuf, PCAP_ERRBUF_SIZE,
-			 "stream: link-layer type %d isn't supported in savefiles",
-			 p->linktype);
+				 "stream: link-layer type %d isn't supported in savefiles",
+				 p->linktype);
 		return (NULL);
 	}
 	linktype |= p->linktype_ext;
@@ -1808,70 +1778,31 @@ pcap_ng_dump_fopen(pcap_t *p, FILE *f)
 void
 pcap_ng_dump(u_char *user, const struct pcap_pkthdr *h, const u_char *sp)
 {
-	FILE *f;
+	pcap_dumper_t *dumper = (pcap_dumper_t *)user;
+	int retval;
+	struct pcapng_enhanced_packet_fields *epb;
 	uint64_t ts;
-	struct pcapng_block_header bh;
-	struct pcapng_enhanced_packet_fields epb;
-	struct pcapng_block_trailer bt;
-	unsigned char packetpad = 0;
-	size_t len = sizeof(bh) + sizeof(epb) + h->caplen + sizeof(bt);
-	struct pcapng_option_header ohcomm;
-	struct pcapng_option_header oht;
-	size_t commlen = 0;
-	unsigned char commpad = 0;
 	
-	if (h->comment[0]) {
-		/* Comment option */
-		commlen = strlen(h->comment);
-		ohcomm.option_code   = PCAPNG_OPT_COMMENT;
-		ohcomm.option_length = commlen;
-		len += sizeof(ohcomm) + commlen;
-		if (commlen % 4 != 0) {
-			commpad = 4 - (commlen % 4);
-			len += commpad;
-		}
-		/* Option terminator */
-		oht.option_code      = PCAPNG_OPT_ENDOFOPT;
-		oht.option_length    = 0;
-		len += sizeof(oht);
+	retval = pcap_ng_block_reset(dumper->dump_block, PCAPNG_BT_EPB);
+	if (retval != 0) {
+		return;
 	}
 	
-	if (h->caplen % 4 != 0) {
-		packetpad = 4 - (h->caplen % 4);
-		len += packetpad;
-	}
-	
-	bh.block_type   = PCAPNG_BT_EPB;
-	bh.total_length = (bpf_u_int32)len;
-	
-	epb.caplen		   = h->caplen;
-	epb.interface_id   = 0;
-	epb.len            = h->len;
+	epb = pcap_ng_get_enhanced_packet_fields(dumper->dump_block);
+	epb->caplen = h->caplen;
+	epb->interface_id = 0;
+	epb->len = h->len;
 	/* Microsecond resolution */
-	ts = h->ts.tv_sec * 1000000 + h->ts.tv_usec;
-	epb.timestamp_high = ts >> 32;
-	epb.timestamp_low  = ts & 0xffffffff;
+	ts = ((uint64_t)h->ts.tv_sec) * 1000000 + (uint64_t)h->ts.tv_usec;
+	epb->timestamp_high = ts >> 32;
+	epb->timestamp_low  = ts & 0xffffffff;
 	
-	bt.total_length = (bpf_u_int32)len;
+	pcap_ng_block_packet_set_data(dumper->dump_block, sp, epb->caplen);
 	
-	f = ((pcap_dumper_t *)user)->f;
-	/* XXX we should check the return status */
-	/* Header */
-	(void)fwrite(&bh, sizeof(bh), 1, f);
-	(void)fwrite(&epb, sizeof(epb), 1, f);
-	/* Packet */
-	(void)fwrite(sp, h->caplen, 1, f);
-	if (packetpad)
-		(void)fseek(f, packetpad, SEEK_CUR);
-	/* Options */
 	if (h->comment[0]) {
-		(void)fwrite(&ohcomm, sizeof(ohcomm), 1, f);
-		(void)fwrite(h->comment, commlen, 1, f);
-		if (commpad)
-			(void)fseek(f, commpad, SEEK_CUR);
-		(void)fwrite(&oht, sizeof(oht), 1, f);
+		pcap_ng_block_add_option_with_string(dumper->dump_block, PCAPNG_OPT_COMMENT, &h->comment[0]);
 	}
-	(void)fwrite(&bt, sizeof(bt), 1, f);
+	(void) pcap_ng_dump_block(dumper, dumper->dump_block);
 }
 
 void
@@ -1885,4 +1816,3 @@ pcap_ng_dump_close(pcap_dumper_t *p)
 }
 
 #endif /* __APPLE__ */
-

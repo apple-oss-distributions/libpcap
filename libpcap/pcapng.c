@@ -523,7 +523,7 @@ pcap_ng_block_add_option_with_value(pcapng_block_t block, u_short code,
 int
 pcap_ng_block_add_option_with_string(pcapng_block_t block, u_short code, const char *str)
 {
-	return (pcap_ng_block_add_option_with_value(block, code, str, strlen(str) + 1));
+	return (pcap_ng_block_add_option_with_value(block, code, str, strlen(str)));
 }
 
 int

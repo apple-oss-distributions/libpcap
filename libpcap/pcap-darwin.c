@@ -58,6 +58,12 @@
 #include "pcap-util.h"
 #include "pcap-pktap.h"
 
+#ifdef BPF_WAKE_PKT
+#ifndef BPF_PKTFLAGS_WAKE_PKT
+#define BPF_PKTFLAGS_WAKE_PKT BPF_WAKE_PKT
+#endif /* BPF_PKTFLAGS_WAKE_PKT */
+#endif /* BPF_WAKE_PKT */
+
 static int pcap_cleanup_pktap_interface_internal(const char *ifname, char *ebuf);
 
 /*
@@ -566,9 +572,6 @@ pcap_filter_pktap(pcap_t *pcap, pcap_dumper_t *dumper, struct pcap_if_info *if_i
 						       pktp_hdr->pth_dlt, pcap->snapshot,
 						       pcap->filter_str, pcap->errbuf);
 			if (if_info == NULL) {
-				snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
-						 "%s: pcap_add_if_info(%s) failed",
-						 __func__, pktp_hdr->pth_ifname);
 				return (0);
 			}
 		}
@@ -599,8 +602,8 @@ pcap_filter_pktap(pcap_t *pcap, pcap_dumper_t *dumper, struct pcap_if_info *if_i
 /*
  * Add a section header block when needed
  */
-static int
-pcapng_dump_shb(pcap_t *pcap, pcap_dumper_t *dumper)
+int
+pcap_ng_dump_shb(pcap_t *pcap, pcap_dumper_t *dumper)
 {
 	pcapng_block_t block = NULL;
 	int retval;
@@ -663,7 +666,7 @@ pcapng_dump_shb(pcap_t *pcap, pcap_dumper_t *dumper)
 			return (0);
 		}
 		
-		snprintf(buf, sizeof(buf), "%s %s", utsname.sysname, utsname.release);
+		snprintf(buf, sizeof(buf), "%s", utsname.version);
 		retval = pcap_ng_block_add_option_with_string(block, PCAPNG_SHB_OS, buf);
 		if(retval != 0) {
 			snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
@@ -747,9 +750,6 @@ pcap_ng_dump_proc(pcap_t *pcap, pcap_dumper_t *dumper, pcapng_block_t block,
 		proc_info = pcap_proc_info_set_add_uuid(&dumper->dump_proc_info_set, pid, pcomm,
 							uu, pcap->errbuf);
 		if (proc_info == NULL) {
-			snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
-				 "%s: allocate_proc_info(%s) failed",
-				 __func__, pcomm);
 			return (NULL);
 		}
 	}
@@ -767,7 +767,7 @@ pcap_ng_dump_kern_event(pcap_t *pcap, pcap_dumper_t *dumper,
 	pcapng_block_t block = NULL;
 	struct pcapng_os_event_fields *osev_fields;
 
-	if (pcapng_dump_shb(pcap, dumper) == 0)
+	if (pcap_ng_dump_shb(pcap, dumper) == 0)
 		return (0);
 	
 	block = dumper->dump_block;
@@ -861,7 +861,7 @@ pcap_ng_dump_pktap_comment(pcap_t *pcap, pcap_dumper_t *dumper,
 		return (0);
 	}
 	
-	if (pcapng_dump_shb(pcap, dumper) == 0)
+	if (pcap_ng_dump_shb(pcap, dumper) == 0)
 		return (0);
 	
 	block = dumper->dump_block;
@@ -875,9 +875,6 @@ pcap_ng_dump_pktap_comment(pcap_t *pcap, pcap_dumper_t *dumper,
 					       pktp_hdr->pth_dlt, pcap->snapshot,
 					       pcap->filter_str, pcap->errbuf);
 		if (if_info == NULL) {
-			snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
-				 "%s: pcap_add_if_info(%s) failed",
-				 __func__, pktp_hdr->pth_ifname);
 			return (0);
 		}
 	}
@@ -893,9 +890,6 @@ pcap_ng_dump_pktap_comment(pcap_t *pcap, pcap_dumper_t *dumper,
 	 */
 	if_info = pcap_ng_dump_if_info(pcap, dumper, block, if_info);
 	if (if_info == NULL) {
-		snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
-			 "%s: pcap_ng_dump_if_info(%s) failed",
-			 __func__, pktp_hdr->pth_ifname);
 		return (0);
 	}
 	
@@ -981,6 +975,12 @@ pcap_ng_dump_pktap_comment(pcap_t *pcap, pcap_dumper_t *dumper,
 	}
 #endif /* PTH_FLAG_NEXUS_CHAN */
 
+#ifdef PTH_FLAG_WAKE_PKT
+	if (pktp_hdr->pth_flags & PTH_FLAG_WAKE_PKT) {
+		pmdflags |= PCAPNG_EPB_PMDF_WAKE_PKT;
+	}
+#endif /* PTH_FLAG_WAKE_PKT */
+
 	if (pmdflags != 0) {
 		pcap_ng_block_add_option_with_value(block, PCAPNG_EPB_PMD_FLAGS, &pmdflags, 4);
 	}
@@ -1009,7 +1009,7 @@ pcap_ng_dump_decryption_secrets(pcap_t *pcap, pcap_dumper_t *dumper,
 		return 0;
 	}
 
-	if (pcapng_dump_shb(pcap, dumper) == 0)
+	if (pcap_ng_dump_shb(pcap, dumper) == 0)
 		return (0);
 
 	block = dumper->dump_block;
@@ -1109,6 +1109,8 @@ pcap_svc2str(uint32_t svc)
 			return "VO";
 		case SO_TC_CTL:
 			return "CTL";
+		case SO_TC_NETSVC_SIG:
+			return "SIG";
 		default:
 			snprintf(svcstr, sizeof(svcstr), "%u", svc);
 			return svcstr;
@@ -1121,42 +1123,101 @@ pcap_read_bpf_header(pcap_t *p, u_char *bp, struct pcap_pkthdr *pkthdr)
 	struct bpf_hdr_ext *bhep = ((struct bpf_hdr_ext *)bp);
 	char tmpbuf[100];
 	int tlen;
+	char *strsep = "";
 
 	pkthdr->comment[0] = 0;
 
-	if (p->extendedhdr == 0)
+	if (p->extendedhdr == 0) {
 		return;
+	}
 
 	if (bhep->bh_comm[0] != 0) {
 		bzero(&tmpbuf, sizeof (tmpbuf));
 		tlen = snprintf(tmpbuf, sizeof (tmpbuf),
-				 "pid %s.%d svc %s", bhep->bh_comm,
-				 bhep->bh_pid, pcap_svc2str(bhep->bh_svc));
-	if (tlen > 0)
-		strlcat(pkthdr->comment,
-				tmpbuf,
-				sizeof (pkthdr->comment));
+				"%sproc %s:%d", strsep, bhep->bh_comm, bhep->bh_pid);
+		if (tlen > 0) {
+			strlcat(pkthdr->comment, tmpbuf, sizeof (pkthdr->comment));
+			strsep = ", ";
+		}
 	}
-	if (bhep->bh_pktflags > 0) {
-		bzero(&tmpbuf, sizeof (tmpbuf));
-		tlen = snprintf(tmpbuf, sizeof (tmpbuf),
-						" pktflags 0x%x",
-						bhep->bh_pktflags);
-		if (tlen > 0)
-			strlcat(pkthdr->comment,
-					tmpbuf,
-					sizeof (pkthdr->comment));
+
+	bzero(&tmpbuf, sizeof (tmpbuf));
+	tlen = snprintf(tmpbuf, sizeof (tmpbuf),
+			"%ssvc %s", strsep, pcap_svc2str(bhep->bh_svc));
+	if (tlen > 0) {
+		strlcat(pkthdr->comment, tmpbuf, sizeof (pkthdr->comment));
+		strsep = ", ";
 	}
+
+	if (bhep->bh_pktflags != 0) {
+		if (bhep->bh_pktflags & BPF_PKTFLAGS_TCP_REXMT) {
+			bzero(&tmpbuf, sizeof (tmpbuf));
+			tlen = snprintf(tmpbuf, sizeof (tmpbuf),
+					"%sre", strsep);
+			if (tlen > 0) {
+				strlcat(pkthdr->comment, tmpbuf, sizeof (pkthdr->comment));
+				strsep = ", ";
+			}
+		}
+		if (bhep->bh_pktflags & BPF_PKTFLAGS_START_SEQ) {
+			bzero(&tmpbuf, sizeof (tmpbuf));
+			tlen = snprintf(tmpbuf, sizeof (tmpbuf),
+					"%sst", strsep);
+			if (tlen > 0) {
+				strlcat(pkthdr->comment, tmpbuf, sizeof (pkthdr->comment));
+				strsep = ", ";
+			}
+		}
+		if (bhep->bh_pktflags & BPF_PKTFLAGS_LAST_PKT) {
+			bzero(&tmpbuf, sizeof (tmpbuf));
+			tlen = snprintf(tmpbuf, sizeof (tmpbuf),
+					"%slp", strsep);
+			if (tlen > 0) {
+				strlcat(pkthdr->comment, tmpbuf, sizeof (pkthdr->comment));
+				strsep = ", ";
+			}
+		}
+
+#ifdef BPF_PKTFLAGS_WAKE_PKT
+		if (bhep->bh_pktflags & BPF_PKTFLAGS_WAKE_PKT) {
+			bzero(&tmpbuf, sizeof (tmpbuf));
+			tlen = snprintf(tmpbuf, sizeof (tmpbuf),
+					"%swk", strsep);
+			if (tlen > 0) {
+				strlcat(pkthdr->comment, tmpbuf, sizeof (pkthdr->comment));
+				strsep = ", ";
+			}
+		}
+	}
+#endif /* BPF_PKTFLAGS_WAKE_PKT */
 
 	if (bhep->bh_unsent_bytes > 0) {
 		bzero(&tmpbuf, sizeof (tmpbuf));
 		tlen = snprintf(tmpbuf, sizeof (tmpbuf),
-						" unsent %u",
-						bhep->bh_unsent_bytes);
-		if (tlen > 0)
-			strlcat(pkthdr->comment,
-					tmpbuf,
-					sizeof (pkthdr->comment));
+				"%sunsent %u", strsep, bhep->bh_unsent_bytes);
+		if (tlen > 0) {
+			strlcat(pkthdr->comment, tmpbuf, sizeof (pkthdr->comment));
+			strsep = ", ";
+		}
+	}
+
+#define BPF_HDR_EXT_FLAGS_DIR_MASK (BPF_HDR_EXT_FLAGS_DIR_IN | BPF_HDR_EXT_FLAGS_DIR_OUT)
+	if ((bhep->bh_flags & BPF_HDR_EXT_FLAGS_DIR_MASK) == BPF_HDR_EXT_FLAGS_DIR_IN) {
+		bzero(&tmpbuf, sizeof (tmpbuf));
+		tlen = snprintf(tmpbuf, sizeof (tmpbuf),
+				"%sin", strsep);
+		if (tlen > 0) {
+			strlcat(pkthdr->comment, tmpbuf, sizeof (pkthdr->comment));
+			strsep = ", ";
+		}
+	} else {
+		bzero(&tmpbuf, sizeof (tmpbuf));
+		tlen = snprintf(tmpbuf, sizeof (tmpbuf),
+				"%sout", strsep);
+		if (tlen > 0) {
+			strlcat(pkthdr->comment, tmpbuf, sizeof (pkthdr->comment));
+			strsep = ", ";
+		}
 	}
 }
 
@@ -1198,9 +1259,6 @@ pcap_filter_pktap_v2(pcap_t *pcap, pcap_dumper_t *dumper, struct pcap_if_info *i
 						       pktap_v2_hdr->pth_dlt, pcap->snapshot,
 						       pcap->filter_str, pcap->errbuf);
 			if (if_info == NULL) {
-				snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
-					 "%s: pcap_add_if_info(%s) failed",
-					 __func__, ifname);
 				return (0);
 			}
 		}
@@ -1268,7 +1326,7 @@ pcap_ng_dump_pktap_v2(pcap_t *pcap, pcap_dumper_t *dumper,
 	}
 	ifname = ((char *) pktap_v2_hdr) + pktap_v2_hdr->pth_ifname_offset;
 	
-	if (pcapng_dump_shb(pcap, dumper) == 0)
+	if (pcap_ng_dump_shb(pcap, dumper) == 0)
 		return (0);
 	
 	block = dumper->dump_block;
@@ -1282,9 +1340,6 @@ pcap_ng_dump_pktap_v2(pcap_t *pcap, pcap_dumper_t *dumper,
 					       pktap_v2_hdr->pth_dlt, pcap->snapshot,
 					       pcap->filter_str, pcap->errbuf);
 		if (if_info == NULL) {
-			snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
-				 "%s: pcap_add_if_info(%s) failed",
-				 __func__, ifname);
 			return (0);
 		}
 	}
@@ -1300,9 +1355,6 @@ pcap_ng_dump_pktap_v2(pcap_t *pcap, pcap_dumper_t *dumper,
 	 */
 	if_info = pcap_ng_dump_if_info(pcap, dumper, block, if_info);
 	if (if_info == NULL) {
-		snprintf(pcap->errbuf, PCAP_ERRBUF_SIZE,
-			 "%s: pcap_ng_dump_if_info(%s) failed",
-			 __func__, ifname);
 		return (0);
 	}
 	
@@ -1403,6 +1455,12 @@ pcap_ng_dump_pktap_v2(pcap_t *pcap, pcap_dumper_t *dumper,
 		pmdflags |= PCAPNG_EPB_PMDF_NEXUS_CHANNEL;
 	}
 #endif /* PTH_FLAG_NEXUS_CHAN */
+
+#ifdef PTH_FLAG_WAKE_PKT
+	if (pktap_v2_hdr->pth_flags & PTH_FLAG_WAKE_PKT) {
+		pmdflags |= PCAPNG_EPB_PMDF_WAKE_PKT;
+	}
+#endif /* PTH_FLAG_WAKE_PKT */
 
 	if (pmdflags != 0) {
 		pcap_ng_block_add_option_with_value(block, PCAPNG_EPB_PMD_FLAGS, &pmdflags, 4);

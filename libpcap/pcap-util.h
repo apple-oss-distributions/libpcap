@@ -35,6 +35,9 @@
 #include <pcap/pcap.h>
 #include <uuid/uuid.h>
 
+extern int pcap_ng_dump_shb(pcap_t *pcap, pcap_dumper_t *dumper);
+
+
 struct pcap_if_info {
 	int if_id;
 	int if_dump_id; /* may be different from if_id because of filtering */

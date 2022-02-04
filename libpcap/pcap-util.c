@@ -104,6 +104,30 @@ pcap_if_info_set_free(struct pcap_if_info_set *if_info_set, struct pcap_if_info 
 	}
 }
 
+/*
+ * entry point for using the compiler with no pcap open
+ * pass in all the stuff that is needed explicitly instead.
+ */
+static int
+pcap_compile_nopcap_err(int snaplen_arg, int linktype_arg,
+						struct bpf_program *program,
+						const char *buf, int optimize, bpf_u_int32 mask,
+						char *errbuf)
+{
+	pcap_t *p;
+	int ret;
+
+	p = pcap_open_dead(linktype_arg, snaplen_arg);
+	if (p == NULL)
+		return (-1);
+	ret = pcap_compile(p, program, buf, optimize, mask);
+	if (ret != 0 && errbuf != NULL) {
+		pcap_strlcpy(errbuf, p->errbuf, PCAP_ERRBUF_SIZE);
+	}
+	pcap_close(p);
+	return (ret);
+}
+
 struct pcap_if_info *
 pcap_if_info_set_add(struct pcap_if_info_set *if_info_set, const char *name,
 		 int if_id, int linktype, int snaplen,
@@ -140,14 +164,11 @@ pcap_if_info_set_add(struct pcap_if_info_set *if_info_set, const char *name,
 	 * the DLT so we store the program in the if_info
 	 */
 	if (filter_str != NULL && *filter_str != 0) {
-		if (pcap_compile_nopcap(if_info->if_snaplen,
-					if_info->if_linktype,
-					&if_info->if_filter_program,
-					filter_str, 0, PCAP_NETMASK_UNKNOWN) == -1) {
-			if (errbuf != NULL) {
-				snprintf(errbuf, PCAP_ERRBUF_SIZE,
-					 "%s: pcap_compile_nopcap() failed", __func__);
-			 }
+		if (pcap_compile_nopcap_err(if_info->if_snaplen,
+					    if_info->if_linktype,
+					    &if_info->if_filter_program,
+					    filter_str, 0, PCAP_NETMASK_UNKNOWN,
+					    errbuf) == -1) {
 			free(if_info);
 			return (NULL);
 		}
